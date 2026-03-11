@@ -853,9 +853,11 @@ def _h1a(raw):
     if not assemblies:
         _log("WARN", "Ph1a: Keine Baugruppen erhalten → leere Liste", phase=1)
 
+    # Display up to 8 names (matches the 6-8 limit in the prompt)
+    _MAX_DISPLAY_ASSEMBLIES = 8
     _log("OK",
          f"Phase 1a: {len(assemblies)} Baugruppen erkannt: "
-         f"{', '.join(a.get('name','?') for a in assemblies[:6])}",
+         f"{', '.join(a.get('name','?') for a in assemblies[:_MAX_DISPLAY_ASSEMBLIES])}",
          phase=1)
 
     # Zonen-Visualisierung
@@ -974,8 +976,10 @@ def _h2(raw):
     asm_item = next((a for a in asm if a.get("name") == asm_name), {})
     overall  = clf.get("overall_bounds", [])
 
-    validation_error = _validate_bounds_for_retry(b, overall, placed, part_name) if b else \
-        "Kein gueltiges Bounds-Format erhalten."
+    validation_error = (
+        _validate_bounds_for_retry(b, overall, placed, part_name)
+        if b else "Kein gueltiges Bounds-Format erhalten."
+    )
 
     if validation_error and retry_cnt < 2:
         _log("WARN",

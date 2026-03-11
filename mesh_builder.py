@@ -333,9 +333,9 @@ def _build_cylinder(name: str, b: list):
         cache.log(cache.LEVEL_WARN,f"Zylinder '{name}': {e} → Box"); bm.free()
         return _build_box(name,b)
     bm.to_mesh(mesh); bm.free()
-  obj = bpy.data.objects.new(name,mesh)
-_link_to_col(obj) # <-- SO IST ES RICHTIG
-return obj
+    obj = bpy.data.objects.new(name, mesh)
+    _link_to_col(obj)
+    return obj
 
 def _build_convex_hull(name: str, points: list, b: list):
     mesh = bpy.data.meshes.new(name + "_mesh"); bm = bmesh.new()
@@ -356,9 +356,9 @@ def _build_convex_hull(name: str, points: list, b: list):
         cache.log(cache.LEVEL_WARN,f"Hull '{name}': {e} → Box"); bm.free()
         return _build_box(name,b)
     bm.to_mesh(mesh); bm.free()
-  obj = bpy.data.objects.new(name,mesh)
-_link_to_col(obj) # <-- SO IST ES RICHTIG
-return obj
+    obj = bpy.data.objects.new(name, mesh)
+    _link_to_col(obj)
+    return obj
 
 def _apply_material(obj, color: list,
                     metallic: float = 0.0, roughness: float = 0.5, name: str = ""):

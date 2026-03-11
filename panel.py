@@ -1,8 +1,8 @@
 """
-panel.py - Text to Blender v6.0.0
+panel.py - Text to Blender v7.0.0
 ════════════════════════════════════
 Vollständiges UI mit Tabs: Mesh | Material | Animation | Script
-Universelle Beispiele — kein Bezug zu spezifischen Objekttypen.
+Zoom-In Pipeline v7.0.0 — neue Fortschrittsanzeige mit Sub-Phasen.
 """
 import bpy, os, traceback
 from . import pipeline, llm_client, cache
@@ -245,14 +245,25 @@ class TTB_PT_MainPanel(bpy.types.Panel):
 
     def _draw_progress(self, layout, state, phase, si, st):
         pb = layout.box()
+        sub_phase = state.get("sub_phase")
+        # Zeige neue Unterphasen im Fortschrittsbalken
         phase_map = [
-            ("0", "Klass"), ("1", "Baugr"), ("2", "Bounds"),
-            ("3", "Punkte"), ("4", "Mesh"), ("5", "Material"),
+            ("0a", "Typ"),   ("0b", "Gross"), ("1a", "Teile"),
+            ("1b", "Untert"), ("2", "Bounds"),
+            ("3", "Punkte"), ("4", "Mesh"),   ("5", "Mat"),
         ]
+        # Aktive Phase ermitteln (kombiniert phase + sub_phase)
+        if phase == 0:
+            active_key = "0b" if sub_phase == "b" else "0a"
+        elif phase == 1:
+            active_key = "1b" if sub_phase == "b" else "1a"
+        else:
+            active_key = str(phase)
+
         row = pb.row()
         row.scale_y = 0.45
         for ph_key, lbl in phase_map:
-            row.label(text=f"[{lbl}]" if str(phase) == ph_key else lbl)
+            row.label(text=f"[{lbl}]" if active_key == ph_key else lbl)
         pb.label(text=state.get("phase_label", "..."))
         if st > 0:
             row2 = pb.row()
@@ -266,8 +277,12 @@ class TTB_PT_MainPanel(bpy.types.Panel):
         sc.scale_y = 0.65
         asm   = state.get("assemblies", [])
         parts = state.get("all_parts",  [])
-        if asm:   sc.label(text=f"{len(asm)} Baugruppen erkannt")
-        if parts: sc.label(text=f"{len(parts)} Teile expandiert")
+        placed = state.get("placed",    [])
+        retry  = state.get("bounds_retry_count", 0)
+        if asm:    sc.label(text=f"{len(asm)} Baugruppen erkannt")
+        if parts:  sc.label(text=f"{len(parts)} Teile expandiert")
+        if placed: sc.label(text=f"{len(placed)} Teile platziert")
+        if retry:  sc.label(text=f"Retry {retry}/2 ...")
 
     # ── Code-Tab (Material / Animation / Script) ──────────────────────────────
 
@@ -313,10 +328,12 @@ class TTB_PT_MainPanel(bpy.types.Panel):
             hint.scale_y = 0.65
             n = props.max_bounds_parts
             m = props.max_pointcloud_parts
-            hint.label(text=f"≈ {n} LLM-Calls für Bounds")
-            hint.label(text=f"+ {m} LLM-Calls für Pointclouds")
-            hint.label(text=f"+ ~5 Calls fix (Klass./Baugr./Mat.)")
-            hint.label(text=f"→ gesamt ca. {n + m + 5} LLM-Calls")
+            hint.label(text=f"Phase 0a+0b: 2 Calls (Typ + Groesse)")
+            hint.label(text=f"Phase 1a+1b: ~{1 + len([])+1} Calls (Teile)")
+            hint.label(text=f"Phase 2: ~{n} Calls (Bounds + Retry)")
+            hint.label(text=f"Phase 3: ~{m} Calls (Pointclouds)")
+            hint.label(text=f"Phase 5: 1 Call (Materialien)")
+            hint.label(text=f"→ gesamt ca. {n + m + 6} LLM-Calls")
 
     # ── Log-Box ───────────────────────────────────────────────────────────────
 

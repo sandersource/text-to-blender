@@ -1,7 +1,7 @@
 bl_info = {
     "name":        "Text to Blender",
     "author":      "Sander",
-    "version":     (6, 0, 0),
+    "version":     (7, 0, 0),
     "blender":     (4, 0, 0),
     "location":    "View3D > Sidebar > LLM",
     "description": "Universeller Text-to-3D Generator: Meshes, Materialien, Animationen, Scripte",
@@ -24,7 +24,7 @@ def _try_import(name):
         else: return None
         return m
     except Exception as e:
-        print(f"[TTB v6] Import '{name}': {e}")
+        print(f"[TTB v7] Import '{name}': {e}")
         traceback.print_exc()
         return None
 
@@ -38,16 +38,16 @@ def register():
             try:
                 m.register()
             except Exception as e:
-                print(f"[TTB v6] register '{name}': {e}")
+                print(f"[TTB v7] register '{name}': {e}")
                 traceback.print_exc()
     cm = _modules.get("cache")
     if cm:
         try:
-            cm.log_separator("Text to Blender v6.0.0")
+            cm.log_separator("Text to Blender v7.0.0")
             cm.log(cm.LEVEL_INFO, "Bereit.")
         except Exception:
             pass
-    print("[Text to Blender] v6.0.0 registriert.")
+    print("[Text to Blender] v7.0.0 registriert.")
 
 def unregister():
     for name in ("operators", "panel"):
@@ -57,7 +57,7 @@ def unregister():
                 m.unregister()
             except Exception:
                 pass
-    print("[Text to Blender] v6.0.0 deregistriert.")
+    print("[Text to Blender] v7.0.0 deregistriert.")
 
 if __name__ == "__main__":
     register()

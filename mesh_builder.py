@@ -1,8 +1,9 @@
 """
-mesh_builder.py - LLM Assistant v2.9.0
+mesh_builder.py - LLM Assistant v3.0.0
 ════════════════════════════════════════
-Neu in v2.9.0:
-  validate_bounds_list() → Overlap-Check + Groessen-Check mit detailliertem Log
+Neu in v3.0.0 (Zoom-In Pipeline):
+  Syntax-Fix: _build_cylinder() und _build_convex_hull() korrekte Einrueckung
+  validate_spatial_distribution() → prueft ob Teile raeumlich verteilt sind
 """
 
 import bpy, bmesh
@@ -179,6 +180,35 @@ def validate_bounds_list(parts: list, overall_bounds: list, phase: int = 3):
 
     return warnings
 
+def validate_spatial_distribution(parts: list, phase: int = 2) -> bool:
+    """
+    Prueft ob Teile raeumlich verteilt sind.
+    Warnt wenn >50% der Teile-Zentren in einem Bereich < 1cm liegen.
+    Gibt True zurueck wenn Verteilung OK, False wenn verdaechtig.
+    """
+    centers = []
+    for p in parts:
+        b = p.get("bounds", [])
+        if len(b) == 6:
+            centers.append(((b[0]+b[1])/2, (b[2]+b[3])/2, (b[4]+b[5])/2))
+    if len(centers) < 3:
+        return True
+    xs = [c[0] for c in centers]
+    ys = [c[1] for c in centers]
+    spread_x = max(xs) - min(xs)
+    spread_y = max(ys) - min(ys)
+    if spread_x < 0.01 and spread_y < 0.01:
+        cache.log(cache.LEVEL_ERROR,
+                  f"RAEUMLICHE VERTEILUNG: Alle {len(centers)} Teile im Bereich "
+                  f"{spread_x*100:.1f}cm x {spread_y*100:.1f}cm — "
+                  f"Bounds-Generierung wahrscheinlich fehlgeschlagen!",
+                  phase=phase)
+        return False
+    cache.log(cache.LEVEL_OK,
+              f"Raeumliche Verteilung OK: Spread X={spread_x*100:.1f}cm Y={spread_y*100:.1f}cm",
+              phase=phase)
+    return True
+
 # ── Zonen-Visualisierung ──────────────────────────────────────────────────────
 
 def visualize_zones(zones: list):
@@ -333,9 +363,9 @@ def _build_cylinder(name: str, b: list):
         cache.log(cache.LEVEL_WARN,f"Zylinder '{name}': {e} → Box"); bm.free()
         return _build_box(name,b)
     bm.to_mesh(mesh); bm.free()
-  obj = bpy.data.objects.new(name,mesh)
-_link_to_col(obj) # <-- SO IST ES RICHTIG
-return obj
+    obj = bpy.data.objects.new(name, mesh)
+    _link_to_col(obj)
+    return obj
 
 def _build_convex_hull(name: str, points: list, b: list):
     mesh = bpy.data.meshes.new(name + "_mesh"); bm = bmesh.new()
@@ -356,9 +386,9 @@ def _build_convex_hull(name: str, points: list, b: list):
         cache.log(cache.LEVEL_WARN,f"Hull '{name}': {e} → Box"); bm.free()
         return _build_box(name,b)
     bm.to_mesh(mesh); bm.free()
-  obj = bpy.data.objects.new(name,mesh)
-_link_to_col(obj) # <-- SO IST ES RICHTIG
-return obj
+    obj = bpy.data.objects.new(name, mesh)
+    _link_to_col(obj)
+    return obj
 
 def _apply_material(obj, color: list,
                     metallic: float = 0.0, roughness: float = 0.5, name: str = ""):

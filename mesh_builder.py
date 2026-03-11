@@ -1,8 +1,10 @@
 """
-mesh_builder.py - LLM Assistant v2.9.0
-════════════════════════════════════════
-Neu in v2.9.0:
-  validate_bounds_list() → Overlap-Check + Groessen-Check mit detailliertem Log
+mesh_builder.py - Text to Blender v7.0.0
+══════════════════════════════════════════
+Neu in v7.0.0:
+  - _build_box() nutzt _link_to_col() statt bpy.context.collection.objects.link()
+  - build_final() ruft _link_to_col() nicht mehr doppelt auf
+  - validate_bounds_list() → Overlap-Check + Groessen-Check mit detailliertem Log
 """
 
 import bpy, bmesh
@@ -179,6 +181,60 @@ def validate_bounds_list(parts: list, overall_bounds: list, phase: int = 3):
 
     return warnings
 
+
+def check_spatial_distribution(parts: list, overall_bounds: list, phase: int = 2):
+    """
+    Prueft nach Phase 2 ob >50% der Teile-Mittelpunkte in einem sehr kleinen
+    Bereich liegen (Stacking-Problem).  Loggt eine prominente Warnung.
+    Gibt True zurueck wenn ein Stacking-Problem erkannt wurde.
+    """
+    if not parts or not overall_bounds or len(overall_bounds) != 6:
+        return False
+
+    ob = overall_bounds
+    total_dx = max(0.001, ob[1] - ob[0])
+    total_dy = max(0.001, ob[3] - ob[2])
+    total_dz = max(0.001, ob[5] - ob[4])
+
+    centers = []
+    for p in parts:
+        b = p.get("bounds", [])
+        if len(b) != 6:
+            continue
+        cx = (b[0] + b[1]) / 2.0
+        cy = (b[2] + b[3]) / 2.0
+        cz = (b[4] + b[5]) / 2.0
+        centers.append((cx, cy, cz))
+
+    if len(centers) < 3:
+        return False
+
+    # Berechne wie viele Mittelpunkte innerhalb von 10% der Gesamtbounds liegen
+    threshold_x = total_dx * 0.10
+    threshold_y = total_dy * 0.10
+    threshold_z = total_dz * 0.10
+
+    stacked = 0
+    ref_cx = (ob[0] + ob[1]) / 2.0
+    ref_cy = (ob[2] + ob[3]) / 2.0
+    ref_cz = (ob[4] + ob[5]) / 2.0
+
+    for cx, cy, cz in centers:
+        if (abs(cx - ref_cx) < threshold_x and
+                abs(cy - ref_cy) < threshold_y and
+                abs(cz - ref_cz) < threshold_z):
+            stacked += 1
+
+    stacked_pct = stacked / len(centers) * 100
+    if stacked_pct > 50:
+        cache.log(cache.LEVEL_WARN,
+                  f"⚠️  STACKING-PROBLEM: {stacked}/{len(centers)} Teile ({stacked_pct:.0f}%) "
+                  f"haben Mittelpunkte nahe der Gesamtmitte — Objekte wahrscheinlich uebereinander!",
+                  phase=phase)
+        return True
+    return False
+
+
 # ── Zonen-Visualisierung ──────────────────────────────────────────────────────
 
 def visualize_zones(zones: list):
@@ -198,7 +254,6 @@ def visualize_zones(zones: list):
             obj = _build_box(name, b)
             obj.display_type = "WIRE"
             _apply_material(obj, [0.1, 0.8, 0.2, 0.15])
-            _link_to_col(obj)
             created += 1
         except Exception as e:
             cache.log(cache.LEVEL_WARN, f"Zone '{name}': {e}")
@@ -225,9 +280,8 @@ def visualize_joint(joint_data: dict):
         if len(verts) >= 3: bm.faces.new(verts)
         bm.to_mesh(mesh); bm.free()
         obj = bpy.data.objects.new(name, mesh)
-        bpy.context.collection.objects.link(obj)
-        _apply_material(obj, [1.0, 0.5, 0.05, 0.7])
         _link_to_col(obj)
+        _apply_material(obj, [1.0, 0.5, 0.05, 0.7])
         cache.log(cache.LEVEL_OK, f"Joint '{pa}↔{pb}': {len(verts)} Punkte", phase=2)
         return obj
     except Exception as e:
@@ -250,7 +304,6 @@ def build_placeholder(part: dict):
         obj = _build_box(f"LLM_{name}", b)
         obj.display_type = "WIRE"
         _apply_material(obj, part.get("color_rgba", [0.4, 0.6, 0.9, 0.25]))
-        _link_to_col(obj)
         cache.log(cache.LEVEL_OK, f"Platzhalter '{name}': {[round(v,2) for v in b]}")
         return obj
     except Exception as e:
@@ -291,7 +344,6 @@ def build_final(parts: list) -> list:
             else:
                 obj = _build_box(obj_name, b)
             _apply_material(obj, color)
-            _link_to_col(obj)
             created.append(obj)
             cache.log(cache.LEVEL_OK, f"[{i+1}/{len(parts)}] '{name}' ({method})",
                       phase=5, part=name)
@@ -315,7 +367,7 @@ def _build_box(name: str, b: list):
         except Exception: pass
     bm.to_mesh(mesh); bm.free()
     obj = bpy.data.objects.new(name, mesh)
-    bpy.context.collection.objects.link(obj)
+    _link_to_col(obj)
     return obj
 
 def _build_cylinder(name: str, b: list):

@@ -1,5 +1,5 @@
 """
-cache.py - Text to Blender v6.0.0
+cache.py - Text to Blender v7.0.0
 ════════════════════════════════════
 Zentrales Log-, Cache- und Projektordner-Management.
 

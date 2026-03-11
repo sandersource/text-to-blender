@@ -1,5 +1,5 @@
 """
-llm_client.py - Text to Blender v6.0.0
+llm_client.py - Text to Blender v7.0.0
 ════════════════════════════════════════
 Echter Ollama HTTP-Client. Nur Python-Standardbibliothek (urllib).
 

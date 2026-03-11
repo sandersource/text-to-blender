@@ -1,5 +1,5 @@
 """
-panel.py - Text to Blender v6.0.0
+panel.py - Text to Blender v7.0.0
 ════════════════════════════════════
 Vollständiges UI mit Tabs: Mesh | Material | Animation | Script
 Universelle Beispiele — kein Bezug zu spezifischen Objekttypen.
@@ -40,12 +40,12 @@ class TTB_Properties(bpy.types.PropertyGroup):
     max_parts_per_assembly: bpy.props.IntProperty(
         name="Max. Teile / Baugruppe",
         description="Maximale Anzahl Einzelteile pro Baugruppe",
-        default=5, min=2, max=30, soft_max=10
+        default=8, min=2, max=30, soft_max=12
     )
     max_bounds_parts: bpy.props.IntProperty(
         name="Max. Bounds-Teile",
         description="Maximale Gesamtzahl Teile die Bounds erhalten (= LLM-Calls für Phase 2)",
-        default=20, min=5, max=200, soft_max=30
+        default=25, min=5, max=200, soft_max=40
     )
     max_pointcloud_parts: bpy.props.IntProperty(
         name="Max. Pointcloud-Teile",
@@ -245,14 +245,24 @@ class TTB_PT_MainPanel(bpy.types.Panel):
 
     def _draw_progress(self, layout, state, phase, si, st):
         pb = layout.box()
+        ph0_step = state.get("_ph0_step", 0)
+        # Phase 0 zeigt Sub-Schritte (0a/0b/1a)
+        ph0_labels = ["0a:Typ", "0b:Größe", "1a:Baugr"]
         phase_map = [
-            ("0", "Klass"), ("1", "Baugr"), ("2", "Bounds"),
-            ("3", "Punkte"), ("4", "Mesh"), ("5", "Material"),
+            ("0.0", "0a"), ("0.1", "0b"), ("0.2", "1a"),
+            ("1",   "1b:Teile"), ("2", "Bounds"),
+            ("3",   "Punkte"), ("4", "Mesh"), ("5", "Mat"),
         ]
+        # Berechne den aktuellen Phase-Key
+        if phase == 0:
+            current_key = f"0.{ph0_step}"
+        else:
+            current_key = str(phase)
+
         row = pb.row()
         row.scale_y = 0.45
         for ph_key, lbl in phase_map:
-            row.label(text=f"[{lbl}]" if str(phase) == ph_key else lbl)
+            row.label(text=f"[{lbl}]" if current_key == ph_key else lbl)
         pb.label(text=state.get("phase_label", "..."))
         if st > 0:
             row2 = pb.row()

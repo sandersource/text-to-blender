@@ -1,17 +1,101 @@
 """
-prompts.py - Text to Blender v6.0.0
+prompts.py - Text to Blender v7.0.0
 ═════════════════════════════════════
 Universelle Pipeline-Prompts.
 Kein Bezug zu spezifischen Objekttypen — funktioniert für ALLES.
 
-Phase 0 : Klassifikation & Baugruppen
-Phase 1x: Pro Baugruppe → Einzelteile
-Phase 2 : Pro Teil → Bounds
+Phase 0a: WAS ist es? (Typ, Kategorie, Symmetrie) — 1 Call
+Phase 0b: Wie GROSS? (nur L × B × H in Metern + overall_bounds) — 1 Call
+Phase 1a: Welche HAUPTBAUGRUPPEN? (2-8 Namen + Beschreibung) — 1 Call
+Phase 1b: Pro Baugruppe → Einzelteile (N Calls)
+Phase 2 : Pro Teil → Bounds (sequenziell, mit ASCII-Kontext)
 Phase 3 : Pro Teil (convex_hull) → Pointcloud
 Phase 5 : Materialien
 """
 
-# ── Phase 0: Klassifikation ──────────────────────────────────────────────────
+# ── Phase 0a: WAS ist es? ────────────────────────────────────────────────────
+
+PHASE_0A_WHAT = """
+Du bist ein 3D-Objekt-Klassifikator für Blender.
+Bestimme NUR Typ, Kategorie und Symmetrie des beschriebenen Objekts.
+
+Antworte AUSSCHLIESSLICH mit gültigem JSON, kein Text davor oder danach:
+
+{
+  "object_type": "string",
+  "category": "vehicle|building|furniture|nature|mechanical|creature|tool|weapon|food|abstract|other",
+  "main_axis": "X|Y|Z",
+  "symmetry": "bilateral|radial|none",
+  "complexity": "simple|medium|complex"
+}
+
+Regeln:
+- object_type: kurzer beschreibender Name (z.B. "Gamepad", "Auto", "Haus")
+- complexity: simple (≤5 Teile), medium (6-15 Teile), complex (>15 Teile)
+- Keine langen Erklärungen, nur das JSON
+""".strip()
+
+
+# ── Phase 0b: Wie GROSS? ─────────────────────────────────────────────────────
+
+PHASE_0B_SIZE = """
+Du bist ein 3D-Geometrie-Experte für Blender.
+Bestimme NUR die realistischen Abmessungen und Overall-Bounds des Objekts.
+
+KOORDINATENSYSTEM:
+  X = LÄNGE/TIEFE  (hinten=-X, vorne=+X, Mitte=0)
+  Y = BREITE       (links=-Y, rechts=+Y, Mitte=0)
+  Z = HÖHE         (Boden=0, oben=+Z)
+
+Antworte AUSSCHLIESSLICH mit gültigem JSON, kein Text davor oder danach:
+
+{
+  "dimensions_m": {"length": float, "width": float, "height": float},
+  "overall_bounds": [xmin, xmax, ymin, ymax, zmin, zmax]
+}
+
+Kritische Regeln:
+- Realistische Maße in Metern für das beschriebene Objekt
+- overall_bounds: xmin=-length/2, xmax=+length/2, ymin=-width/2, ymax=+width/2, zmin=0, zmax=height
+- xmin < xmax, ymin < ymax, zmin < zmax (zwingend!)
+- Beispiele: Gamepad: 0.15x0.10x0.05m; Auto: 4.5x1.8x1.5m; Haus: 10x8x7m
+""".strip()
+
+
+# ── Phase 1a: Hauptbaugruppen ────────────────────────────────────────────────
+
+PHASE_1A_MAIN_PARTS = """
+Du bist ein 3D-Modellierungs-Experte für Blender.
+Zerlege das Objekt in seine wichtigsten Baugruppen.
+
+KOORDINATENSYSTEM:
+  X = LÄNGE (hinten=-X, vorne=+X)
+  Y = BREITE (links=-Y, rechts=+Y)
+  Z = HÖHE  (Boden=0, oben=+Z)
+
+Antworte AUSSCHLIESSLICH mit gültigem JSON, kein Text davor oder danach:
+
+{
+  "assemblies": [
+    {
+      "name": "baugruppen_name",
+      "description": "Was ist diese Baugruppe und welche Form hat sie?",
+      "role": "Welche Funktion hat sie am Gesamtobjekt?",
+      "estimated_parts": integer,
+      "rough_bounds": [xmin, xmax, ymin, ymax, zmin, zmax]
+    }
+  ]
+}
+
+Regeln:
+- 2-6 logische Hauptbaugruppen passend zum jeweiligen Objekt
+- rough_bounds: grobe Bounding Box der Baugruppe in Metern (innerhalb overall_bounds!)
+- Keine Leerzeichen in Namen (Unterstriche stattdessen)
+- Baugruppen-Bounds dürfen sich leicht überlappen, sollen aber das Objekt vollständig abdecken
+""".strip()
+
+
+# ── Phase 0: Klassifikation (komplett, Legacy-kompatibel) ────────────────────
 
 PHASE_0_CLASSIFY = """
 Du bist ein universeller 3D-Objekt-Klassifikator für Blender.
@@ -31,6 +115,7 @@ Antworte AUSSCHLIESSLICH mit gültigem JSON, kein Text davor oder danach:
   "overall_bounds": [xmin, xmax, ymin, ymax, zmin, zmax],
   "main_axis": "X|Y|Z",
   "symmetry": "bilateral|radial|none",
+  "complexity": "simple|medium|complex",
   "estimated_parts": integer,
   "assemblies": [
     {
@@ -44,8 +129,9 @@ Antworte AUSSCHLIESSLICH mit gültigem JSON, kein Text davor oder danach:
 }
 
 Regeln:
-- assemblies: 2-8 logische Hauptbaugruppen passend zum jeweiligen Objekt
+- assemblies: 2-6 logische Hauptbaugruppen passend zum jeweiligen Objekt
 - rough_bounds: grobe Bounding Box der Baugruppe in Metern
+- complexity: simple (≤5 Teile), medium (6-15 Teile), complex (>15 Teile)
 - Keine Leerzeichen in Namen (Unterstriche stattdessen)
 - Dimensionen und Proportionen realistisch für das beschriebene Objekt wählen
 """.strip()

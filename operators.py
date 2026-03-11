@@ -1,5 +1,5 @@
 """
-operators.py - Text to Blender v6.0.0
+operators.py - Text to Blender v7.0.0
 """
 import bpy, os, re, subprocess
 from . import pipeline, llm_client, mesh_builder, cache

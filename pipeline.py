@@ -1,17 +1,19 @@
 """
-pipeline.py - Text to Blender v6.0.0
+pipeline.py - Text to Blender v7.0.0
 ══════════════════════════════════════
-Universelle hierarchische Pipeline:
+Universelle hierarchische Pipeline v7.0.0:
 
-Phase 0  : Klassifikation (1 LLM-Call)
-             → Objekt-Typ, Maße, 2-8 Baugruppen mit rough_bounds
-Phase 1x : Pro Baugruppe Einzelteile (N_assemblies LLM-Calls)
-             → Symmetrie-Expansion nur für mirror_Y/radial_N Teile
-Phase 2  : Pro Teil Bounds (sequenziell, max MAX_BOUNDS_PARTS)
-             → Mit Spatial-Context (ASCII-Sketch + bereits platzierte Teile)
-             → Bounds-Validierung mit bis zu 2 Retry-Versuchen
-             → Auto-Platzierung wenn alle Retries fehlschlagen
-Phase 3  : Pro convex_hull-Teil Pointcloud (max MAX_POINTCLOUD_PARTS)
+Phase 0a : WAS ist es? (Typ, Kategorie, Komplexität) — 1 Call
+Phase 0b : Wie GROSS? (L×B×H + overall_bounds) — 1 Call
+Phase 1a : Welche HAUPTBAUGRUPPEN? (Namen + rough_bounds) — 1 Call
+Phase 1b : Pro Baugruppe Einzelteile (N_assemblies LLM-Calls)
+              → Symmetrie-Expansion nur für mirror_Y/radial_N Teile
+Phase 2  : Pro Teil Bounds (sequenziell, max max_bounds_parts)
+              → Mit globalem Spatial-Context (ASCII-Sketch aller platzierten Teile)
+              → Kompakter Kontext-Summary statt roher JSON-Dumps
+              → Bounds-Validierung mit bis zu 2 Retry-Versuchen
+              → Auto-Platzierung wenn alle Retries fehlschlagen
+Phase 3  : Pro convex_hull-Teil Pointcloud (max max_pointcloud_parts)
 Phase 4  : Mesh-Bau im Blender-Main-Thread (via bpy.app.timers!)
 Phase 5  : Materialien (1 LLM-Call)
 """
@@ -37,8 +39,8 @@ _state = {
     "placed":         [],
     "final_parts":    [],
 
-    "max_parts_per_assembly": 5,
-    "max_bounds_parts":       20,
+    "max_parts_per_assembly": 8,
+    "max_bounds_parts":       25,
     "max_pointcloud_parts":   10,
     "detail":    "medium",
     "llm_model": "",
@@ -50,6 +52,7 @@ _state = {
     "pending_err":  None,
     "bounds_warnings": [],
     "_ph2_retry_count": 0,
+    "_ph0_step":        0,   # 0=0a(WAS), 1=0b(GROESSE), 2=1a(BAUGRUPPEN)
 }
 
 DETAIL_POINTS = {"einfach": 8, "medium": 24, "hoch": 64}
@@ -62,6 +65,8 @@ DEFAULT_PART_SIZE_RATIO  = 0.25 # Standard-Teilgröße: 25% der Baugruppe (X/Y)
 DEFAULT_PART_SIZE_RATIO_Z = 0.30 # Standard-Teilgröße: 30% der Baugruppe (Z)
 AUTO_PLACE_MIN_SIZE      = 0.05 # Minimale Teilgröße bei Auto-Platzierung (m)
 AUTO_PLACE_Y_MARGIN      = 0.10 # Y-Achsen-Rand bei Auto-Platzierung (10% pro Seite)
+MAX_ASSEMBLIES           = 6    # Maximale Anzahl Baugruppen (Phase 1a)
+MAX_OTHER_PARTS_DISPLAY  = 8    # Maximale Anzahl anderer Teile im Phase-2-Kontext
 
 # ── Logging ──────────────────────────────────────────────────────────────────
 
@@ -92,11 +97,11 @@ def _parse_json(text):
 # ── Pipeline starten / stoppen ───────────────────────────────────────────────
 
 def start(prompt, model, host, detail="medium", project_dir="",
-          max_parts_per_assembly=5, max_bounds_parts=20, max_pointcloud_parts=10):
+          max_parts_per_assembly=8, max_bounds_parts=25, max_pointcloud_parts=10):
 
     if project_dir:
         cache.set_project_dir(project_dir)
-    cache.log_separator(f"TEXT TO BLENDER v6.0.0 | Prompt: {prompt}")
+    cache.log_separator(f"TEXT TO BLENDER v7.0.0 | Prompt: {prompt}")
     _log("INFO",
          f"Limits: max_parts={max_parts_per_assembly}, "
          f"max_bounds={max_bounds_parts}, "
@@ -119,6 +124,7 @@ def start(prompt, model, host, detail="medium", project_dir="",
             "pending_raw": None, "pending_err": None,
             "bounds_warnings": [],
             "_ph2_retry_count": 0,
+            "_ph0_step":        0,
         })
     _run_phase()
 
@@ -134,6 +140,7 @@ def reset():
             "pending_raw": None, "pending_err": None,
             "bounds_warnings": [],
             "_ph2_retry_count": 0,
+            "_ph0_step":        0,
         })
     _log("INFO", "Pipeline zurückgesetzt.")
 
@@ -155,27 +162,64 @@ def _run_phase():
         mpa    = _state["max_parts_per_assembly"]
         mbp    = _state["max_bounds_parts"]
         mpc    = _state["max_pointcloud_parts"]
+        ph0_step = _state.get("_ph0_step", 0)
 
-    # Phase 0: Klassifikation
+    # ── Phase 0: Klassifikation (3 Sub-Schritte: 0a → 0b → 1a) ───────────────
     if phase == 0:
-        _call(prompts.PHASE_0_CLASSIFY,
-              f'Erstelle ein 3D-Objekt: "{prompt}"',
-              model, host, 0, "Klassifikation", "")
+        if ph0_step == 0:
+            # Phase 0a: WAS ist das Objekt?
+            _call(prompts.PHASE_0A_WHAT,
+                  f'Beschreibe: "{prompt}"',
+                  model, host, 0, "0a: Typ + Kategorie", "")
 
-    # Phase 1x: Pro Baugruppe Einzelteile
+        elif ph0_step == 1:
+            # Phase 0b: Wie GROSS ist es? (kompakter Kontext aus 0a)
+            user = (
+                f'Objekt: "{prompt}"\n'
+                f'Typ: {clf.get("object_type","?")} | '
+                f'Kategorie: {clf.get("category","?")}\n'
+                f'Bestimme jetzt die realistischen Abmessungen und Bounds.'
+            )
+            _call(prompts.PHASE_0B_SIZE, user,
+                  model, host, 0, "0b: Größe + Bounds", "")
+
+        elif ph0_step == 2:
+            # Phase 1a: Welche Haupt-Baugruppen?
+            dim = clf.get("dimensions_m", {})
+            user = (
+                f'Objekt: "{prompt}"\n'
+                f'Typ: {clf.get("object_type","?")} | '
+                f'Kategorie: {clf.get("category","?")}\n'
+                f'Größe: L={dim.get("length","?")}m '
+                f'B={dim.get("width","?")}m '
+                f'H={dim.get("height","?")}m\n'
+                f'Overall Bounds: {clf.get("overall_bounds","?")}\n\n'
+                f'Zerlege dieses Objekt in 2-{MAX_ASSEMBLIES} logische Hauptbaugruppen.\n'
+                f'LIMIT: maximal {MAX_ASSEMBLIES} Baugruppen.'
+            )
+            _call(prompts.PHASE_1A_MAIN_PARTS, user,
+                  model, host, 0, "1a: Hauptbaugruppen", "")
+
+        else:
+            _log("ERR", f"Unbekannter ph0_step: {ph0_step}")
+            with _lock:
+                _state["status"] = "error"
+                _state["last_error"] = f"ph0_step {ph0_step} unbekannt"
+
+    # ── Phase 1b: Pro Baugruppe Einzelteile ──────────────────────────────────
     elif phase == 1:
         if idx < len(queue):
             asm_item = queue[idx]
             asm_name = asm_item.get("name", "?")
             rb       = asm_item.get("rough_bounds", clf.get("overall_bounds", []))
+            dim      = clf.get("dimensions_m", {})
             user = (
                 f'Objekt: "{prompt}"\n'
                 f'Typ: {clf.get("object_type","?")} | '
                 f'Kategorie: {clf.get("category","?")}\n'
-                f'Gesamtmaße: L={clf.get("dimensions_m",{}).get("length","?")}m '
-                f'B={clf.get("dimensions_m",{}).get("width","?")}m '
-                f'H={clf.get("dimensions_m",{}).get("height","?")}m\n'
-                f'Gesamtbounds: {clf.get("overall_bounds","?")}\n\n'
+                f'Größe: L={dim.get("length","?")}m '
+                f'B={dim.get("width","?")}m '
+                f'H={dim.get("height","?")}m\n\n'
                 f'=== Baugruppe: {asm_name} ===\n'
                 f'Beschreibung: {asm_item.get("description","")}\n'
                 f'Rolle: {asm_item.get("role","")}\n'
@@ -187,7 +231,7 @@ def _run_phase():
             )
             _call(prompts.PHASE_1_ASSEMBLY_DETAIL, user,
                   model, host, 1,
-                  f"Baugruppe: {asm_name} ({idx+1}/{len(queue)})",
+                  f"1b: Teile von {asm_name} ({idx+1}/{len(queue)})",
                   asm_name)
         else:
             total = len(parts)
@@ -200,16 +244,15 @@ def _run_phase():
                     _state["all_parts"] = _state["all_parts"][:mbp]
             _advance(2)
 
-    # Phase 2: Bounds pro Teil
+    # ── Phase 2: Bounds pro Teil ──────────────────────────────────────────────
     elif phase == 2:
         if idx < len(queue):
             part      = queue[idx]
             part_name = part.get("name", "?")
             asm_name  = part.get("_assembly", "")
             asm_item  = next((a for a in asm if a.get("name") == asm_name), {})
-            same_asm  = [p for p in placed if p.get("_assembly") == asm_name]
 
-            user = _build_ph2_user_prompt(part, asm_item, clf, same_asm, prompt)
+            user = _build_ph2_user_prompt(part, asm_item, clf, placed, prompt)
             _call(prompts.PHASE_2_BOUNDS, user,
                   model, host, 2,
                   f"Bounds: {part_name} ({idx+1}/{len(queue)})",
@@ -218,13 +261,15 @@ def _run_phase():
             _log("OK", f"Phase 2 fertig: {len(placed)} Teile platziert.", phase=2)
             overall  = clf.get("overall_bounds", [])
             warnings = mesh_builder.validate_bounds_list(placed, overall, phase=2)
+            # Spatial distribution check
+            mesh_builder.check_spatial_distribution(placed, overall, phase=2)
             with _lock:
                 _state["bounds_warnings"] = warnings
             cache.log_parts_list(placed, phase=2)
             cache.save_step(2, {"parts": placed})
             _advance(3)
 
-    # Phase 3: Pointclouds
+    # ── Phase 3: Pointclouds ──────────────────────────────────────────────────
     elif phase == 3:
         if idx < len(queue):
             part      = queue[idx]
@@ -253,7 +298,7 @@ def _run_phase():
             # Phase 4 MUSS im Main-Thread laufen!
             _schedule_phase_4()
 
-    # Phase 5: Materialien
+    # ── Phase 5: Materialien ──────────────────────────────────────────────────
     elif phase == 5:
         with _lock:
             fp = list(_state["final_parts"])
@@ -518,30 +563,56 @@ def _build_ascii_sketch(placed: list, asm_bounds: list, width: int = 40, height:
 
 
 def _build_ph2_user_prompt(part: dict, asm_item: dict, clf: dict,
-                           placed_same_asm: list, prompt: str,
+                           all_placed: list, prompt: str,
                            retry_info: str = "") -> str:
-    """Baut den vollständigen User-Prompt für Phase 2 (inkl. Spatial-Context)."""
+    """Baut den vollständigen User-Prompt für Phase 2 (inkl. globalem Spatial-Context)."""
     part_name = part.get("name", "?")
     asm_name  = part.get("_assembly", "")
     rb        = asm_item.get("rough_bounds", clf.get("overall_bounds", []))
+    dim       = clf.get("dimensions_m", {})
 
+    # Kompakter Kontext-Summary
     user = (
         f'Objekt: "{prompt}"\n'
-        f'Gesamtbounds: {clf.get("overall_bounds","?")}\n'
-        f'Koordinatensystem: X=Länge(vorne=+X), Y=Breite(rechts=+Y), Z=Höhe(Boden=0)\n\n'
+        f'Typ: {clf.get("object_type","?")} ({clf.get("category","?")})\n'
+        f'Größe: {dim.get("length","?")}m x {dim.get("width","?")}m x {dim.get("height","?")}m\n'
+        f'Overall Bounds: {clf.get("overall_bounds","?")}\n\n'
         f'=== Baugruppe: {asm_name} ===\n'
         f'Baugruppen-Bounds: {rb}\n'
         f'Beschreibung: {asm_item.get("description","")}\n\n'
     )
 
-    if placed_same_asm:
-        user += f'Bereits platzierte Teile in dieser Baugruppe ({len(placed_same_asm)}):\n'
-        for p in placed_same_asm:
-            b = p.get("bounds", [])
-            user += f'  {p["name"]}: {[round(v, 2) for v in b]}\n'
-        sketch = _build_ascii_sketch(placed_same_asm, rb)
-        if sketch:
-            user += f'\nDraufsicht (X→ rechts, Y↑ oben):\n{sketch}\n'
+    if all_placed:
+        # Zeige alle bereits platzierten Teile (kompaktes Format)
+        same_asm = [p for p in all_placed if p.get("_assembly") == asm_name]
+        other    = [p for p in all_placed if p.get("_assembly") != asm_name]
+
+        user += f'Bereits platziert ({len(all_placed)} Teile gesamt):\n'
+        if same_asm:
+            user += f'  [Diese Baugruppe: {asm_name}]\n'
+            for p in same_asm:
+                b = p.get("bounds", [])
+                if len(b) == 6:
+                    user += (f'    {p["name"]:<25} '
+                             f'X[{b[0]:+.3f}..{b[1]:+.3f}] '
+                             f'Y[{b[2]:+.3f}..{b[3]:+.3f}] '
+                             f'Z[{b[4]:+.3f}..{b[5]:+.3f}]\n')
+        if other:
+            user += f'  [Andere Baugruppen: {len(other)} Teile]\n'
+            for p in other[:MAX_OTHER_PARTS_DISPLAY]:
+                b = p.get("bounds", [])
+                if len(b) == 6:
+                    user += (f'    {p["name"]:<25} '
+                             f'X[{b[0]:+.3f}..{b[1]:+.3f}] '
+                             f'Y[{b[2]:+.3f}..{b[3]:+.3f}] '
+                             f'Z[{b[4]:+.3f}..{b[5]:+.3f}]\n')
+
+        # Globale ASCII-Draufsicht (alle platzierten Teile)
+        overall_b = clf.get("overall_bounds")
+        if overall_b and len(overall_b) == 6:
+            sketch = _build_ascii_sketch(all_placed, overall_b)
+            if sketch:
+                user += f'\nDraufsicht GESAMT (X→ rechts, Y↑ oben):\n{sketch}\n'
         user += "\n"
 
     if retry_info:
@@ -626,23 +697,111 @@ def _process():
 # ── Phase-Handler ─────────────────────────────────────────────────────────────
 
 def _h0(raw):
+    """Dispatcher für Phase 0 Sub-Schritte (0a/0b/1a)."""
+    with _lock:
+        step = _state.get("_ph0_step", 0)
+    if step == 0:
+        _h0a(raw)
+    elif step == 1:
+        _h0b(raw)
+    elif step == 2:
+        _h1a(raw)
+    else:
+        _log("ERR", f"Unbekannter ph0_step: {step}", phase=0)
+        with _lock:
+            _state["status"] = "error"
+            _state["last_error"] = f"ph0_step {step} unbekannt"
+
+
+def _h0a(raw):
+    """Phase 0a: WAS ist das Objekt? (Typ, Kategorie, Komplexität)"""
     try:
         data = _parse_json(raw)
     except Exception as e:
-        _log("WARN", f"Ph0 JSON: {e} → leere Klassifikation", phase=0)
+        _log("WARN", f"Ph0a JSON: {e} → defaults", phase=0)
         data = {}
 
-    cache.log_json("Klassifikation", data, phase=0)
-    cache.save_step(0, data)
+    obj_type   = data.get("object_type", "Objekt")
+    category   = data.get("category", "other")
+    complexity = data.get("complexity", "medium")
 
-    assemblies = data.get("assemblies", [])
+    _log("OK",
+         f"Ph0a: {obj_type} | Kategorie: {category} | Komplexität: {complexity}",
+         phase=0)
+
+    with _lock:
+        clf = dict(_state["classification"])
+        clf.update(data)
+        _state["classification"] = clf
+        _state["_ph0_step"] = 1
+
+    _run_phase()
+
+
+def _h0b(raw):
+    """Phase 0b: Wie GROSS? Dimensionen + overall_bounds. Setzt dynamische Limits."""
+    try:
+        data = _parse_json(raw)
+    except Exception as e:
+        _log("WARN", f"Ph0b JSON: {e} → defaults", phase=0)
+        data = {}
+
+    with _lock:
+        clf = dict(_state["classification"])
+        clf.update(data)
+        _state["classification"] = clf
+
+        # Dynamische Teile-Limits basierend auf Komplexität
+        complexity = clf.get("complexity", "medium")
+        cur_mpa    = _state["max_parts_per_assembly"]
+        cur_mbp    = _state["max_bounds_parts"]
+
+        if complexity == "simple":
+            new_mpa = min(cur_mpa, 4)
+            new_mbp = min(cur_mbp, 15)
+        elif complexity == "complex":
+            new_mpa = min(cur_mpa, 12)
+            new_mbp = cur_mbp
+        else:  # medium
+            new_mpa = min(cur_mpa, 8)
+            new_mbp = min(cur_mbp, 25)
+
+        _state["max_parts_per_assembly"] = new_mpa
+        _state["max_bounds_parts"]       = new_mbp
+        _state["_ph0_step"] = 2
+
     dim = data.get("dimensions_m", {})
     _log("OK",
-         f"Klassifikation: {data.get('object_type','?')} | "
-         f"Kategorie: {data.get('category','?')} | "
-         f"L={dim.get('length','?')}m B={dim.get('width','?')}m H={dim.get('height','?')}m | "
-         f"{len(assemblies)} Baugruppen",
+         f"Ph0b: L={dim.get('length','?')}m B={dim.get('width','?')}m H={dim.get('height','?')}m | "
+         f"Bounds: {data.get('overall_bounds','?')} | "
+         f"Limits → mpa={new_mpa}, mbp={new_mbp}",
          phase=0)
+
+    cache.save_step(0, clf)
+    _run_phase()
+
+
+def _h1a(raw):
+    """Phase 1a: Welche Hauptbaugruppen? Übergang zu Phase 1 (per-assembly detail)."""
+    try:
+        data = _parse_json(raw)
+    except Exception as e:
+        _log("WARN", f"Ph1a JSON: {e} → leere Baugruppen", phase=0)
+        data = {}
+
+    assemblies = data.get("assemblies", [])
+    if not assemblies:
+        # Fallback: eine Baugruppe aus dem Gesamtobjekt
+        with _lock:
+            clf = _state["classification"]
+        assemblies = [{
+            "name":        "main_body",
+            "description": f"Hauptkörper von {clf.get('object_type','Objekt')}",
+            "role":        "Hauptstruktur",
+            "estimated_parts": 3,
+            "rough_bounds": clf.get("overall_bounds", [-0.5, 0.5, -0.5, 0.5, 0.0, 1.0]),
+        }]
+        _log("WARN", "Ph1a: keine Baugruppen → verwende Fallback 'main_body'", phase=0)
 
     # Baugruppen-Bounds visualisieren
     zones = [{"name": a["name"], "bounds": a.get("rough_bounds", [])}
@@ -651,10 +810,18 @@ def _h0(raw):
         mesh_builder.visualize_zones(zones)
 
     with _lock:
-        _state["classification"] = data
+        clf = dict(_state["classification"])
+        clf["assemblies"] = assemblies
+        _state["classification"] = clf
         _state["assemblies"]     = assemblies
         _state["all_parts"]      = []
 
+    _log("OK",
+         f"Ph1a: {len(assemblies)} Baugruppen: " +
+         ", ".join(a.get("name","?") for a in assemblies[:6]),
+         phase=0)
+
+    cache.save_step(0, clf)
     _advance(1)
 
 
@@ -770,7 +937,7 @@ def _h2(raw):
         with _lock:
             _state["_ph2_retry_count"] = retry + 1
         retry_user = _build_ph2_user_prompt(
-            current, asm_item, clf, same_asm, prompt,
+            current, asm_item, clf, placed, prompt,
             retry_info=(
                 f"Du hast bounds={[round(v,2) for v in b]} zurückgegeben.\n"
                 f"Problem: {reason}\n"
@@ -846,6 +1013,7 @@ def _h3(raw):
 
 
 def _h5(raw):
+    data = {}  # Initialisierung vor try-Block verhindert NameError
     try:
         data      = _parse_json(raw)
         materials = data.get("materials", [])

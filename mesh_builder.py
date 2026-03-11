@@ -128,7 +128,7 @@ def validate_bounds_list(parts: list, overall_bounds: list, phase: int = 3):
             status = f"WARNUNG: {pct:.0f}% des Gesamtvolumens (zu gross!)"
             warnings.append(f"'{name}' deckt {pct:.0f}% des Gesamtvolumens ab")
         elif pct > 40:
-            status = f"INFO: {pct:.0f}% (gross aber moeglicherweise OK)"
+            status = f"INFO: {pct:.0f}% (gross aber moeglicherweise OK)" 
 
         lines.append(
             f"  {name:<30} {dx:.2f}x{dy:.2f}x{dz:.2f}m  "
@@ -326,16 +326,22 @@ def _build_cylinder(name: str, b: list):
     r  = max(rx,ry,MIN_SIZE/2)
     c  = Vector(((b[0]+b[1])/2,(b[2]+b[3])/2,(b[4]+b[5])/2))
     try:
-        bmesh.ops.create_cone(bm,cap_ends=True,segments=24,
-                              diameter1=r*2,diameter2=r*2,depth=max(h,MIN_SIZE))
+        # Blender ≥4: create_cylinder; create_cone diameter args deprecated
+        bmesh.ops.create_cylinder(
+            bm,
+            cap_ends=True,
+            segments=32,
+            radius=r,
+            depth=max(h, MIN_SIZE)
+        )
         bmesh.ops.translate(bm,vec=c,verts=bm.verts)
     except Exception as e:
         cache.log(cache.LEVEL_WARN,f"Zylinder '{name}': {e} → Box"); bm.free()
         return _build_box(name,b)
     bm.to_mesh(mesh); bm.free()
-  obj = bpy.data.objects.new(name,mesh)
-_link_to_col(obj) # <-- SO IST ES RICHTIG
-return obj
+    obj = bpy.data.objects.new(name, mesh)
+    _link_to_col(obj)
+    return obj
 
 def _build_convex_hull(name: str, points: list, b: list):
     mesh = bpy.data.meshes.new(name + "_mesh"); bm = bmesh.new()
@@ -356,9 +362,9 @@ def _build_convex_hull(name: str, points: list, b: list):
         cache.log(cache.LEVEL_WARN,f"Hull '{name}': {e} → Box"); bm.free()
         return _build_box(name,b)
     bm.to_mesh(mesh); bm.free()
-  obj = bpy.data.objects.new(name,mesh)
-_link_to_col(obj) # <-- SO IST ES RICHTIG
-return obj
+    obj = bpy.data.objects.new(name, mesh)
+    _link_to_col(obj)
+    return obj
 
 def _apply_material(obj, color: list,
                     metallic: float = 0.0, roughness: float = 0.5, name: str = ""):

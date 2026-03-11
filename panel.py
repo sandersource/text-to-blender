@@ -40,12 +40,12 @@ class TTB_Properties(bpy.types.PropertyGroup):
     max_parts_per_assembly: bpy.props.IntProperty(
         name="Max. Teile / Baugruppe",
         description="Maximale Anzahl Einzelteile pro Baugruppe",
-        default=12, min=2, max=30, soft_max=20
+        default=5, min=2, max=30, soft_max=10
     )
     max_bounds_parts: bpy.props.IntProperty(
         name="Max. Bounds-Teile",
         description="Maximale Gesamtzahl Teile die Bounds erhalten (= LLM-Calls für Phase 2)",
-        default=40, min=5, max=200, soft_max=60
+        default=20, min=5, max=200, soft_max=30
     )
     max_pointcloud_parts: bpy.props.IntProperty(
         name="Max. Pointcloud-Teile",

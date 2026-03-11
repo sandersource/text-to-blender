@@ -1,5 +1,5 @@
 """
-prompts.py - Text to Blender v7.1.0
+prompts.py - Text to Blender v7.2.0
 ═════════════════════════════════════
 Universelle Pipeline-Prompts.
 Kein Bezug zu spezifischen Objekttypen — funktioniert für ALLES.

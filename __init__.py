@@ -8,38 +8,91 @@ bl_info = {
     "category":    "3D View",
 }
 
-import bpy, traceback
+import bpy, traceback, importlib
 
-_modules = {}
+# ---------------------------------------------------------------------------
+# Sub-module reload support (for "Reload Scripts" / re-enable after update)
+# ---------------------------------------------------------------------------
+_MODULE_NAMES = ("cache", "llm_client", "prompts", "mesh_builder", "pipeline", "operators", "panel")
 
-def _try_import(name):
-    try:
-        if   name == "cache":        from . import cache        as m
-        elif name == "llm_client":   from . import llm_client   as m
-        elif name == "prompts":      from . import prompts      as m
-        elif name == "mesh_builder": from . import mesh_builder as m
-        elif name == "pipeline":     from . import pipeline     as m
-        elif name == "operators":    from . import operators    as m
-        elif name == "panel":        from . import panel        as m
-        else: return None
-        return m
-    except Exception as e:
-        print(f"[TTB v6] Import '{name}': {e}")
-        traceback.print_exc()
-        return None
+# Collect any import errors so the fallback panel can display them.
+_import_errors: list[str] = []
+_modules: dict = {}
 
-for _n in ("cache", "llm_client", "prompts", "mesh_builder", "pipeline", "operators", "panel"):
-    _modules[_n] = _try_import(_n)
+def _load_modules() -> None:
+    """Import (or reload) every sub-module and populate ``_modules``."""
+    _import_errors.clear()
+    _modules.clear()
+
+    import sys
+    for name in _MODULE_NAMES:
+        full_name = f"{__name__}.{name}"
+        try:
+            if full_name in sys.modules:
+                m = importlib.reload(sys.modules[full_name])
+            else:
+                m = importlib.import_module(f".{name}", package=__name__)
+            _modules[name] = m
+        except Exception:
+            msg = f"[Text to Blender] Import '{name}' failed:\n{traceback.format_exc()}"
+            print(msg)
+            _import_errors.append(msg)
+            _modules[name] = None
+
+_load_modules()
+
+# ---------------------------------------------------------------------------
+# Fallback error panel – shown when panel/operators could not be loaded
+# ---------------------------------------------------------------------------
+class TTB_PT_ErrorPanel(bpy.types.Panel):
+    bl_label       = "Text to Blender"
+    bl_idname      = "TTB_PT_error"
+    bl_space_type  = "VIEW_3D"
+    bl_region_type = "UI"
+    bl_category    = "LLM"
+
+    def draw(self, context):
+        layout = self.layout
+        layout.label(text="Addon failed to load – see details below:", icon="ERROR")
+        for err in _import_errors:
+            for line in err.splitlines():
+                layout.label(text=line)
+
+# ---------------------------------------------------------------------------
+# register / unregister
+# ---------------------------------------------------------------------------
+_fallback_registered = False
+
 
 def register():
+    global _fallback_registered
+    _fallback_registered = False
+
+    panel_ok = False
     for name in ("panel", "operators"):
         m = _modules.get(name)
-        if m:
-            try:
-                m.register()
-            except Exception as e:
-                print(f"[TTB v6] register '{name}': {e}")
-                traceback.print_exc()
+        if m is None:
+            print(f"[Text to Blender] Skipping register of '{name}': module not loaded.")
+            continue
+        try:
+            m.register()
+            if name == "panel":
+                panel_ok = True
+            print(f"[Text to Blender] Registered '{name}' successfully.")
+        except Exception:
+            msg = f"[Text to Blender] register '{name}' failed:\n{traceback.format_exc()}"
+            print(msg)
+            _import_errors.append(msg)
+
+    # If the real panel did not register, show the fallback error panel instead.
+    if not panel_ok:
+        try:
+            bpy.utils.register_class(TTB_PT_ErrorPanel)
+            _fallback_registered = True
+            print("[Text to Blender] Fallback error panel registered.")
+        except Exception:
+            print(f"[Text to Blender] Could not register fallback panel:\n{traceback.format_exc()}")
+
     cm = _modules.get("cache")
     if cm:
         try:
@@ -47,9 +100,14 @@ def register():
             cm.log(cm.LEVEL_INFO, "Bereit.")
         except Exception:
             pass
+
     print("[Text to Blender] v6.0.0 registriert.")
 
+
 def unregister():
+    global _fallback_registered
+
+    # Unregister normal modules (reverse order).
     for name in ("operators", "panel"):
         m = _modules.get(name)
         if m:
@@ -57,7 +115,24 @@ def unregister():
                 m.unregister()
             except Exception:
                 pass
+
+    # Unregister fallback panel if it was registered.
+    if _fallback_registered:
+        try:
+            bpy.utils.unregister_class(TTB_PT_ErrorPanel)
+        except Exception:
+            pass
+        _fallback_registered = False
+
+    # Clean up scene property if present.
+    if hasattr(bpy.types.Scene, "ttb_props"):
+        try:
+            del bpy.types.Scene.ttb_props
+        except Exception:
+            pass
+
     print("[Text to Blender] v6.0.0 deregistriert.")
+
 
 if __name__ == "__main__":
     register()

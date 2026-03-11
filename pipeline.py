@@ -1,5 +1,5 @@
 """
-pipeline.py - Text to Blender v7.1.0
+pipeline.py - Text to Blender v7.2.0
 ══════════════════════════════════════
 Universelle hierarchische Pipeline v7.0.0:
 
@@ -71,6 +71,8 @@ MAX_ASSEMBLIES           = 6    # Maximale Anzahl Baugruppen (Phase 1a)
 BODY_XY_SCALE_FACTOR     = 0.9  # Hauptkörper abdeckt 90% der XY-Overall-Bounds
 BODY_Z_SCALE_FACTOR      = 0.85 # Hauptkörper Höhe: 85% der Z-Overall-Bounds
 MAX_OTHER_PARTS_DISPLAY  = 8    # Maximale Anzahl anderer Teile im Phase-2-Kontext
+THIN_OBJECT_HEIGHT_RATIO = 0.06 # Korrektur-Faktor für flache Objekte (6% der Länge)
+MIN_POINTCLOUD_SPREAD    = 0.30 # Mindest-Spread-Ratio der Pointcloud auf jeder Achse
 
 # ── Logging ──────────────────────────────────────────────────────────────────
 
@@ -105,7 +107,7 @@ def start(prompt, model, host, detail="medium", project_dir="",
 
     if project_dir:
         cache.set_project_dir(project_dir)
-    cache.log_separator(f"TEXT TO BLENDER v7.1.0 | Prompt: {prompt}")
+    cache.log_separator(f"TEXT TO BLENDER v7.2.0 | Prompt: {prompt}")
     _log("INFO",
          f"Limits: max_parts={max_parts_per_assembly}, "
          f"max_bounds={max_bounds_parts}, "
@@ -217,6 +219,11 @@ def _run_phase():
             asm_name = asm_item.get("name", "?")
             rb       = asm_item.get("rough_bounds", clf.get("overall_bounds", []))
             dim      = clf.get("dimensions_m", {})
+
+            # Bug 3: Liste bereits generierter Teile aus vorherigen Baugruppen
+            existing_part_names = [p.get("name", "?") for p in parts
+                                   if p.get("_assembly") != asm_name]
+
             user = (
                 f'Objekt: "{prompt}"\n'
                 f'Typ: {clf.get("object_type","?")} | '
@@ -228,6 +235,14 @@ def _run_phase():
                 f'Beschreibung: {asm_item.get("description","")}\n'
                 f'Rolle: {asm_item.get("role","")}\n'
                 f'Baugruppen-Bounds: {rb}\n\n'
+            )
+            if existing_part_names:
+                user += (
+                    f'WICHTIG: Generiere NUR Teile die SPEZIFISCH zu "{asm_name}" gehören!\n'
+                    f'Diese Teile existieren BEREITS in anderen Baugruppen — NICHT wiederholen:\n'
+                    f'  {", ".join(existing_part_names[:20])}\n\n'
+                )
+            user += (
                 f'Erstelle die Einzelteile für diese Baugruppe.\n'
                 f'LIMIT: maximal {mpa} Teile.\n'
                 f'Nutze symmetry "mirror_Y" für links/rechts gespiegelte Teile.\n'
@@ -446,32 +461,55 @@ def _validate_ph2_bounds(bounds: list, asm_bounds: list, placed: list):
     """
     Prüft ob Phase-2-Bounds plausibel sind.
     Gibt (is_invalid: bool, reason: str) zurück.
+    Containment-aware: Überlappung mit Container-Teilen (>40% des Baugruppen-Volumens)
+    oder sehr großen Teilen wird als gültige Einbettung akzeptiert.
     """
     if not bounds or len(bounds) != 6:
         return True, "Bounds fehlen oder ungültiges Format"
 
+    vol_a = 0.0
+    vol_new = 0.0
+
     if asm_bounds and len(asm_bounds) == 6:
-        # Prüfe ob Bounds zu ähnlich zu Baugruppen-Bounds sind (Volumen-Verhältnis)
-        # (absoluter 0.01m-Check wäre zu streng bei kleinen Baugruppen)
-        # Prüfe ob Teil größer als die Baugruppe ist
         dx_b = max(0.0, bounds[1] - bounds[0])
         dy_b = max(0.0, bounds[3] - bounds[2])
         dz_b = max(0.0, bounds[5] - bounds[4])
         dx_a = max(0.001, asm_bounds[1] - asm_bounds[0])
         dy_a = max(0.001, asm_bounds[3] - asm_bounds[2])
         dz_a = max(0.001, asm_bounds[5] - asm_bounds[4])
-        vol_b = dx_b * dy_b * dz_b
-        vol_a = dx_a * dy_a * dz_a
-        if vol_a > 0 and vol_b / vol_a > MAX_PART_VOLUME_RATIO:
-            return True, f"Bounds zu groß ({vol_b/vol_a*100:.0f}% der Baugruppe)"
+        vol_new = dx_b * dy_b * dz_b
+        vol_a   = dx_a * dy_a * dz_a
+        if vol_a > 0 and vol_new / vol_a > MAX_PART_VOLUME_RATIO:
+            return True, f"Bounds zu groß ({vol_new/vol_a*100:.0f}% der Baugruppe)"
+    else:
+        dx_b = max(0.0, bounds[1] - bounds[0])
+        dy_b = max(0.0, bounds[3] - bounds[2])
+        dz_b = max(0.0, bounds[5] - bounds[4])
+        vol_new = dx_b * dy_b * dz_b
 
-    # Prüfe starke Überlappung mit bereits platzierten Teilen
+    # Containment-aware Überlappungsprüfung mit bereits platzierten Teilen
     for p in placed:
         pb = p.get("bounds", [])
         if len(pb) != 6:
             continue
         pct_a, pct_b = _bounds_overlap_pct(bounds, pb)
         if pct_a > MAX_OVERLAP_THRESHOLD or pct_b > MAX_OVERLAP_THRESHOLD:
+            # Volumen des bereits platzierten Teils berechnen
+            dx_p = max(0.0, pb[1] - pb[0])
+            dy_p = max(0.0, pb[3] - pb[2])
+            dz_p = max(0.0, pb[5] - pb[4])
+            vol_p = dx_p * dy_p * dz_p
+
+            # Ist das platzierte Teil ein Container? (>40% des Baugruppen-Volumens)
+            p_is_container = (vol_p / vol_a > 0.40) if vol_a > 0 else False
+
+            # Ist das neue Teil viel kleiner als das platzierte? (<15% von dessen Volumen)
+            new_is_small = (vol_new / vol_p < 0.15) if vol_p > 0 else False
+
+            # Containment erlauben: kleines Teil INNERHALB eines Containers ist OK
+            if p_is_container or new_is_small:
+                continue
+
             return True, (
                 f"Starke Überlappung mit '{p.get('name','?')}' "
                 f"({pct_a*100:.0f}%/{pct_b*100:.0f}%)"
@@ -555,6 +593,109 @@ def _enforce_min_assembly_bounds(asm_bounds: list, overall_bounds: list,
             ab[lo_idx] = center - min_size / 2
             ab[hi_idx] = center + min_size / 2
     return ab
+
+
+# Thin object categories for dimension sanity check
+_THIN_OBJECT_KEYWORDS = [
+    "smartphone", "phone", "mobiltelefon", "handy", "tablet", "laptop",
+    "book", "buch", "karte", "card", "remote", "fernbedienung",
+    "notebook", "iphone", "android",
+]
+
+
+def _check_dimensions_sanity(dims: dict, object_type: str, category: str):
+    """
+    Prüft ob Dimensionen für den Objekttyp plausibel sind.
+    Korrigiert zu dicke flache Objekte (Smartphones, Tablets, Bücher etc.).
+    Gibt (was_corrected: bool, dims: dict) zurück.
+    """
+    if not dims:
+        return False, dims
+
+    l = dims.get("length", 0.0)
+    w = dims.get("width",  0.0)
+    h = dims.get("height", 0.0)
+    if l <= 0 or w <= 0 or h <= 0:
+        return False, dims
+
+    sorted_dims = sorted([l, w, h])
+    # ratio = thinnest / longest — should be small for flat objects
+    ratio = sorted_dims[0] / sorted_dims[2] if sorted_dims[2] > 0 else 1.0
+
+    obj_lower = object_type.lower()
+    if not any(t in obj_lower for t in _THIN_OBJECT_KEYWORDS):
+        return False, dims
+
+    # For thin objects, the thinnest dimension should be < 20% of the longest.
+    # If ratio > 0.3, something is probably wrong (e.g. 8cm instead of 8mm).
+    if ratio <= 0.3:
+        return False, dims
+
+    # Auto-correct: set height to ~6% of the longest dimension
+    corrected_thin = sorted_dims[2] * THIN_OBJECT_HEIGHT_RATIO
+    dims = dict(dims)
+    dims["height"] = round(corrected_thin, 4)
+    return True, dims
+
+
+def _fix_pointcloud_spread(points: list, bounds: list) -> list:
+    """
+    Stellt sicher dass die Pointcloud mindestens 30% des Bounds-Bereichs
+    auf jeder Achse abdeckt. Verhindert flache (2D) Convex Hulls.
+    """
+    if not points or len(points) < 4 or not bounds or len(bounds) != 6:
+        return points
+
+    x_min_b, x_max_b = bounds[0], bounds[1]
+    y_min_b, y_max_b = bounds[2], bounds[3]
+    z_min_b, z_max_b = bounds[4], bounds[5]
+    x_range_b = max(x_max_b - x_min_b, 1e-9)
+    y_range_b = max(y_max_b - y_min_b, 1e-9)
+    z_range_b = max(z_max_b - z_min_b, 1e-9)
+
+    xs = [p[0] for p in points]
+    ys = [p[1] for p in points]
+    zs = [p[2] for p in points]
+
+    x_spread = (max(xs) - min(xs)) / x_range_b
+    y_spread = (max(ys) - min(ys)) / y_range_b
+    z_spread = (max(zs) - min(zs)) / z_range_b
+
+    needs_fix = (x_spread < MIN_POINTCLOUD_SPREAD or
+                 y_spread < MIN_POINTCLOUD_SPREAD or
+                 z_spread < MIN_POINTCLOUD_SPREAD)
+    if not needs_fix:
+        return points
+
+    fixed = []
+    n = len(points)
+    half = n // 2
+    for i, p in enumerate(points):
+        nx = p[0]
+        ny = p[1]
+        nz = p[2]
+
+        if x_spread < MIN_POINTCLOUD_SPREAD:
+            # Verteile X: erste Hälfte am unteren Ende, zweite Hälfte am oberen Ende
+            if i < half:
+                nx = x_min_b + x_range_b * 0.10
+            else:
+                nx = x_max_b - x_range_b * 0.10
+
+        if y_spread < MIN_POINTCLOUD_SPREAD:
+            if i < half:
+                ny = y_min_b + y_range_b * 0.10
+            else:
+                ny = y_max_b - y_range_b * 0.10
+
+        if z_spread < MIN_POINTCLOUD_SPREAD:
+            if i < half:
+                nz = z_min_b + z_range_b * 0.10
+            else:
+                nz = z_max_b - z_range_b * 0.10
+
+        fixed.append([nx, ny, nz])
+    return fixed
 
 
 def _build_ascii_sketch(placed: list, asm_bounds: list, width: int = 40, height: int = 8) -> str:
@@ -787,6 +928,29 @@ def _h0b(raw):
     with _lock:
         clf = dict(_state["classification"])
         clf.update(data)
+
+        # Bug 4: Dimensions-Plausibilitätsprüfung für flache Objekte (Smartphones etc.)
+        dim = data.get("dimensions_m", {})
+        obj_type = clf.get("object_type", "")
+        category = clf.get("category", "")
+        corrected, dim = _check_dimensions_sanity(dim, obj_type, category)
+        if corrected:
+            data["dimensions_m"] = dim
+            # Overall-Bounds mit korrigierten Dimensionen neu berechnen
+            l = dim.get("length", 0.1)
+            w = dim.get("width",  0.1)
+            h = dim.get("height", 0.01)
+            data["overall_bounds"] = [
+                round(-l / 2, 4), round(l / 2, 4),
+                round(-w / 2, 4), round(w / 2, 4),
+                0.0, round(h, 4),
+            ]
+            clf.update(data)
+            _log("WARN",
+                 f"Ph0b: Dimensionen korrigiert (zu dick für {obj_type}): "
+                 f"H={dim.get('height','?')}m | Bounds: {data['overall_bounds']}",
+                 phase=0)
+
         _state["classification"] = clf
 
         # Dynamische Teile-Limits basierend auf Komplexität
@@ -1092,6 +1256,9 @@ def _h3(raw):
         except Exception:
             pass
 
+    # Bug 5: Sicherstellen dass die Pointcloud auf allen Achsen ausreichend verteilt ist
+    valid = _fix_pointcloud_spread(valid, bounds)
+
     cache.log_pointcloud(part_name, bounds, valid, phase=3)
     _log("OK", f"{len(valid)} Punkte", phase=3, part=part_name)
 
@@ -1149,6 +1316,28 @@ def _advance(next_phase):
             if len(parts) > mbp:
                 parts = parts[:mbp]
                 _state["all_parts"] = parts
+
+            # Bug 2: Deduplizierung von Teilenamen über Baugruppen hinweg.
+            # Wenn derselbe Name in mehreren Baugruppen vorkommt, wird er mit
+            # dem Baugruppen-Präfix versehen, damit Blender-Objektnamen eindeutig sind.
+            seen_names: set = set()
+            dup_count = 0
+            for part in parts:
+                original_name = part.get("name", "")
+                if not original_name:
+                    continue  # Teile ohne Namen überspringen
+                if original_name in seen_names:
+                    assembly = part.get("_assembly", "")
+                    new_name = f"{assembly}_{original_name}" if assembly else original_name
+                    part["name"] = new_name
+                    dup_count += 1
+                seen_names.add(part.get("name", ""))
+            if dup_count:
+                cache.log(cache.LEVEL_WARN,
+                          f"Phase 2: {dup_count} doppelte Teilenamen mit Baugruppen-Präfix versehen.",
+                          phase=2)
+
+            _state["all_parts"] = parts
             _state["sub_queue"] = parts
             _state["sub_total"] = len(parts)
             msg = f"Phase 2: {len(parts)} Teile erhalten Bounds (limit={mbp})."

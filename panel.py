@@ -1,5 +1,5 @@
 """
-panel.py - Text to Blender v7.0.0
+panel.py - Text to Blender v7.1.0
 ════════════════════════════════════
 Vollständiges UI mit Tabs: Mesh | Material | Animation | Script
 Universelle Beispiele — kein Bezug zu spezifischen Objekttypen.

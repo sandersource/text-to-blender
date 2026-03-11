@@ -1,14 +1,12 @@
 """
-mesh_builder.py - Text to Blender v7.0.0
+mesh_builder.py - Text to Blender v7.1.0
 ══════════════════════════════════════════
-Neu in v7.0.0:
-  - _build_box() nutzt _link_to_col() statt bpy.context.collection.objects.link()
-  - build_final() ruft _link_to_col() nicht mehr doppelt auf
-  - validate_bounds_list() → Overlap-Check + Groessen-Check mit detailliertem Log
+Neu in v7.1.0:
+  - _build_cylinder() nutzt bpy.ops.mesh.primitive_cylinder_add() statt
+    bmesh.ops.create_cylinder() (existiert nicht in Blender 4.x)
 """
 
 import bpy, bmesh
-from mathutils import Vector
 from . import cache
 
 COLLECTION_NAME = "LLM_Objects"
@@ -370,29 +368,31 @@ def _build_box(name: str, b: list):
     return obj
 
 def _build_cylinder(name: str, b: list):
-    mesh = bpy.data.meshes.new(name + "_mesh"); bm = bmesh.new()
-    h  = float(b[5])-float(b[4])
-    rx = (float(b[1])-float(b[0]))/2.0
-    ry = (float(b[3])-float(b[2]))/2.0
-    r  = max(rx,ry,MIN_SIZE/2)
-    c  = Vector(((b[0]+b[1])/2,(b[2]+b[3])/2,(b[4]+b[5])/2))
+    """Erstellt einen Zylinder via bpy.ops (Blender 4.x-kompatibel).
+    bmesh.ops.create_cylinder() existiert in Blender 4.x nicht mehr."""
+    h  = max(float(b[5]) - float(b[4]), MIN_SIZE)
+    rx = (float(b[1]) - float(b[0])) / 2.0
+    ry = (float(b[3]) - float(b[2])) / 2.0
+    r  = max(rx, ry, MIN_SIZE / 2)
+    cx = (b[0] + b[1]) / 2
+    cy = (b[2] + b[3]) / 2
+    cz = (b[4] + b[5]) / 2
     try:
-        # Blender ≥4: create_cylinder; create_cone diameter args deprecated
-        bmesh.ops.create_cylinder(
-            bm,
-            cap_ends=True,
-            segments=32,
+        bpy.ops.mesh.primitive_cylinder_add(
             radius=r,
-            depth=max(h, MIN_SIZE)
+            depth=h,
+            vertices=32,
+            location=(cx, cy, cz),
+            enter_editmode=False
         )
-        bmesh.ops.translate(bm,vec=c,verts=bm.verts)
+        obj = bpy.context.active_object
+        obj.name = name
+        obj.data.name = name + "_mesh"
+        _link_to_col(obj)
+        return obj
     except Exception as e:
-        cache.log(cache.LEVEL_WARN,f"Zylinder '{name}': {e} → Box"); bm.free()
-        return _build_box(name,b)
-    bm.to_mesh(mesh); bm.free()
-    obj = bpy.data.objects.new(name, mesh)
-    _link_to_col(obj)
-    return obj
+        cache.log(cache.LEVEL_WARN, f"Zylinder '{name}': {e} → Box")
+        return _build_box(name, b)
 
 def _build_convex_hull(name: str, points: list, b: list):
     mesh = bpy.data.meshes.new(name + "_mesh"); bm = bmesh.new()

@@ -1,5 +1,5 @@
 """
-prompts.py - Text to Blender v7.0.0
+prompts.py - Text to Blender v7.1.0
 ═════════════════════════════════════
 Universelle Pipeline-Prompts.
 Kein Bezug zu spezifischen Objekttypen — funktioniert für ALLES.
@@ -87,6 +87,11 @@ Antworte AUSSCHLIESSLICH mit gültigem JSON, kein Text davor oder danach:
   ]
 }
 
+WICHTIG: Das ERSTE Element in "assemblies" MUSS immer der Hauptkörper/Gehäuse/Rahmen sein!
+Dieses Teil definiert die äußere Form des Objekts und nimmt 60-80% der Gesamtgröße ein.
+Beispiele: "body", "gehaeuse", "rahmen", "chassis", "shell"
+Alle anderen Teile sitzen AUF oder IN diesem Hauptteil.
+
 Regeln:
 - 2-6 logische Hauptbaugruppen passend zum jeweiligen Objekt
 - rough_bounds: grobe Bounding Box der Baugruppe in Metern (innerhalb overall_bounds!)
@@ -171,9 +176,14 @@ Regeln:
 - method "cylinder" für alle runden/zylindrischen/röhrenförmigen Teile
 - method "convex_hull" für organische oder unregelmäßige Formen
 - method "box" für flache, quaderförmige Teile
-- symmetry "mirror_Y" NUR für Teile die WIRKLICH als Paar vorkommen (z.B. linkes/rechtes Rad, linke/rechte Tür)
-  - NICHT für einteilige Teile wie Rahmen, Armaturenbrett, Windschutzscheibe, Dach, Motor, Getriebe
-  - Bei mirror_Y wird das Teil automatisch als _L und _R verdoppelt — nur verwenden wenn wirklich zwei Exemplare existieren
+WICHTIG zu symmetry:
+- "mirror_Y" NUR verwenden wenn ein Teil WIRKLICH als identisches PAAR existiert
+  (z.B. linkes Rad + rechtes Rad, linker Griff + rechter Griff, linkes Trigger + rechtes Trigger)
+- NICHT verwenden für: einzelne zentrale Teile, Buttons die verschiedene Funktionen haben
+- Ein einzelner Button (Select, Start, Home, A, B) ist IMMER "none"
+- Nur Teile die physisch links UND rechts vorkommen und IDENTISCH sind dürfen "mirror_Y" haben
+- Bei mirror_Y wird das Teil automatisch als _L und _R verdoppelt — NUR wenn wirklich zwei Exemplare existieren
+
 - symmetry "radial_N" für N-fach rotationssymmetrische Teile (z.B. radial_4)
 - symmetry "none" für alle einteiligen, zentralen oder asymmetrischen Teile
 - Keine Leerzeichen in Namen

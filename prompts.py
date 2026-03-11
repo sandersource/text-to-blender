@@ -85,8 +85,11 @@ Regeln:
 - method "cylinder" für alle runden/zylindrischen/röhrenförmigen Teile
 - method "convex_hull" für organische oder unregelmäßige Formen
 - method "box" für flache, quaderförmige Teile
-- symmetry "mirror_Y" für Teile die links/rechts gespiegelt vorkommen
+- symmetry "mirror_Y" NUR für Teile die WIRKLICH als Paar vorkommen (z.B. linkes/rechtes Rad, linke/rechte Tür)
+  - NICHT für einteilige Teile wie Rahmen, Armaturenbrett, Windschutzscheibe, Dach, Motor, Getriebe
+  - Bei mirror_Y wird das Teil automatisch als _L und _R verdoppelt — nur verwenden wenn wirklich zwei Exemplare existieren
 - symmetry "radial_N" für N-fach rotationssymmetrische Teile (z.B. radial_4)
+- symmetry "none" für alle einteiligen, zentralen oder asymmetrischen Teile
 - Keine Leerzeichen in Namen
 - Maximale Teilezahl beachten
 """.strip()
@@ -110,7 +113,20 @@ Antworte AUSSCHLIESSLICH mit gültigem JSON, kein Text davor oder danach:
 Kritische Regeln:
 - xmin < xmax, ymin < ymax, zmin < zmax (zwingend!)
 - Bounds MÜSSEN innerhalb der Baugruppen-Bounds liegen
+- Bounds MÜSSEN kleiner als die Baugruppen-Bounds sein — niemals identisch!
+- Das Teil ist nur EIN Teil der Baugruppe, also deutlich kleiner als die gesamte Baugruppe
 - Maße in Metern, realistisch für das beschriebene Objekt
+- Bereits platzierte Teile NICHT überlappen (andere Bounds wählen!)
+
+Beispiel (FALSCH — identisch mit Baugruppen-Bounds):
+  Baugruppen-Bounds: [-2.25, 2.25, -0.9, 0.9, 0.0, 0.5]
+  ❌ bounds: [-2.25, 2.25, -0.9, 0.9, 0.0, 0.5]  ← zu groß, identisch!
+
+Beispiel (RICHTIG — Teil-spezifische Bounds):
+  Baugruppen-Bounds: [-2.25, 2.25, -0.9, 0.9, 0.0, 0.5]
+  ✓ frame:      [-2.25, 2.25, -0.85, 0.85, 0.0, 0.08]  (flache Bodenplatte)
+  ✓ engine:     [-1.00, 0.50, -0.30, 0.30, 0.08, 0.38]  (Motorblock, vorne)
+  ✓ dashboard:  [0.50, 1.20, -0.60, 0.60, 0.15, 0.45]   (Armaturenbrett, innen)
 """.strip()
 
 

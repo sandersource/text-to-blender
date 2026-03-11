@@ -6,8 +6,11 @@ Universelle hierarchische Pipeline:
 Phase 0  : Klassifikation (1 LLM-Call)
              → Objekt-Typ, Maße, 2-8 Baugruppen mit rough_bounds
 Phase 1x : Pro Baugruppe Einzelteile (N_assemblies LLM-Calls)
-             → Symmetrie-Expansion: mirror_Y → 2x, radial_N → N×
+             → Symmetrie-Expansion nur für mirror_Y/radial_N Teile
 Phase 2  : Pro Teil Bounds (sequenziell, max MAX_BOUNDS_PARTS)
+             → Mit Spatial-Context (ASCII-Sketch + bereits platzierte Teile)
+             → Bounds-Validierung mit bis zu 2 Retry-Versuchen
+             → Auto-Platzierung wenn alle Retries fehlschlagen
 Phase 3  : Pro convex_hull-Teil Pointcloud (max MAX_POINTCLOUD_PARTS)
 Phase 4  : Mesh-Bau im Blender-Main-Thread (via bpy.app.timers!)
 Phase 5  : Materialien (1 LLM-Call)
@@ -34,8 +37,8 @@ _state = {
     "placed":         [],
     "final_parts":    [],
 
-    "max_parts_per_assembly": 12,
-    "max_bounds_parts":       40,
+    "max_parts_per_assembly": 5,
+    "max_bounds_parts":       20,
     "max_pointcloud_parts":   10,
     "detail":    "medium",
     "llm_model": "",
@@ -46,9 +49,19 @@ _state = {
     "pending_raw":  None,
     "pending_err":  None,
     "bounds_warnings": [],
+    "_ph2_retry_count": 0,
 }
 
 DETAIL_POINTS = {"einfach": 8, "medium": 24, "hoch": 64}
+
+# ── Bounds-Validierung: Schwellwerte ─────────────────────────────────────────
+MAX_BOUNDS_RETRIES       = 2    # Maximale Anzahl Retry-Versuche für Phase 2
+MAX_PART_VOLUME_RATIO    = 0.90 # Teil darf max. 90% des Baugruppen-Volumens belegen
+MAX_OVERLAP_THRESHOLD    = 0.50 # Teile mit >50% Überlappung gelten als ungültig
+DEFAULT_PART_SIZE_RATIO  = 0.25 # Standard-Teilgröße: 25% der Baugruppe (X/Y)
+DEFAULT_PART_SIZE_RATIO_Z = 0.30 # Standard-Teilgröße: 30% der Baugruppe (Z)
+AUTO_PLACE_MIN_SIZE      = 0.05 # Minimale Teilgröße bei Auto-Platzierung (m)
+AUTO_PLACE_Y_MARGIN      = 0.10 # Y-Achsen-Rand bei Auto-Platzierung (10% pro Seite)
 
 # ── Logging ──────────────────────────────────────────────────────────────────
 
@@ -79,7 +92,7 @@ def _parse_json(text):
 # ── Pipeline starten / stoppen ───────────────────────────────────────────────
 
 def start(prompt, model, host, detail="medium", project_dir="",
-          max_parts_per_assembly=12, max_bounds_parts=40, max_pointcloud_parts=10):
+          max_parts_per_assembly=5, max_bounds_parts=20, max_pointcloud_parts=10):
 
     if project_dir:
         cache.set_project_dir(project_dir)
@@ -105,6 +118,7 @@ def start(prompt, model, host, detail="medium", project_dir="",
             "log": [], "last_error": None,
             "pending_raw": None, "pending_err": None,
             "bounds_warnings": [],
+            "_ph2_retry_count": 0,
         })
     _run_phase()
 
@@ -119,6 +133,7 @@ def reset():
             "log": [], "last_error": None,
             "pending_raw": None, "pending_err": None,
             "bounds_warnings": [],
+            "_ph2_retry_count": 0,
         })
     _log("INFO", "Pipeline zurückgesetzt.")
 
@@ -192,32 +207,9 @@ def _run_phase():
             part_name = part.get("name", "?")
             asm_name  = part.get("_assembly", "")
             asm_item  = next((a for a in asm if a.get("name") == asm_name), {})
-            rb        = asm_item.get("rough_bounds", clf.get("overall_bounds", []))
             same_asm  = [p for p in placed if p.get("_assembly") == asm_name]
 
-            user = (
-                f'Objekt: "{prompt}"\n'
-                f'Gesamtbounds: {clf.get("overall_bounds","?")}\n'
-                f'Koordinatensystem: X=Länge(vorne=+X), Y=Breite(rechts=+Y), Z=Höhe(Boden=0)\n\n'
-                f'=== Baugruppe: {asm_name} ===\n'
-                f'Baugruppen-Bounds: {rb}\n'
-                f'Beschreibung: {asm_item.get("description","")}\n\n'
-            )
-            if same_asm:
-                user += f'Bereits platzierte Teile ({len(same_asm)}):\n'
-                for p in same_asm:
-                    b = p.get("bounds", [])
-                    user += f'  {p["name"]}: {[round(v,2) for v in b]}\n'
-                user += "\n"
-            user += (
-                f'=== Platziere jetzt ===\n'
-                f'Name:         {part_name}\n'
-                f'Beschreibung: {part.get("description","")}\n'
-                f'Methode:      {part.get("method","box")}\n'
-                f'Symmetrie:    {part.get("symmetry","none")}\n\n'
-                f'Bounds MÜSSEN innerhalb der Baugruppen-Bounds liegen: {rb}\n'
-                f'Gib [xmin,xmax,ymin,ymax,zmin,zmax] in Metern an.'
-            )
+            user = _build_ph2_user_prompt(part, asm_item, clf, same_asm, prompt)
             _call(prompts.PHASE_2_BOUNDS, user,
                   model, host, 2,
                   f"Bounds: {part_name} ({idx+1}/{len(queue)})",
@@ -378,6 +370,196 @@ def _apply_symmetry_to_bounds(part: dict, base_bounds: list) -> list:
 
     return base_bounds
 
+# ── Phase-2-Hilfsfunktionen ───────────────────────────────────────────────────
+
+def _bounds_overlap_pct(ba: list, bb: list):
+    """Gibt (pct_a, pct_b) zurück — den Überlappungsanteil relativ zu Volumen a und b."""
+    if len(ba) != 6 or len(bb) != 6:
+        return 0.0, 0.0
+    ox = max(0.0, min(ba[1], bb[1]) - max(ba[0], bb[0]))
+    oy = max(0.0, min(ba[3], bb[3]) - max(ba[2], bb[2]))
+    oz = max(0.0, min(ba[5], bb[5]) - max(ba[4], bb[4]))
+    ov = ox * oy * oz
+    if ov <= 0:
+        return 0.0, 0.0
+    va = max(1e-9, (ba[1]-ba[0]) * (ba[3]-ba[2]) * (ba[5]-ba[4]))
+    vb = max(1e-9, (bb[1]-bb[0]) * (bb[3]-bb[2]) * (bb[5]-bb[4]))
+    return ov / va, ov / vb
+
+
+def _validate_ph2_bounds(bounds: list, asm_bounds: list, placed: list):
+    """
+    Prüft ob Phase-2-Bounds plausibel sind.
+    Gibt (is_invalid: bool, reason: str) zurück.
+    """
+    if not bounds or len(bounds) != 6:
+        return True, "Bounds fehlen oder ungültiges Format"
+
+    if asm_bounds and len(asm_bounds) == 6:
+        # Prüfe ob Bounds identisch mit Baugruppen-Bounds sind
+        if all(abs(bounds[i] - asm_bounds[i]) < 0.01 for i in range(6)):
+            return True, f"Bounds identisch mit Baugruppen-Bounds {[round(v,2) for v in asm_bounds]}"
+        # Prüfe ob Teil größer als die Baugruppe ist
+        dx_b = max(0.0, bounds[1] - bounds[0])
+        dy_b = max(0.0, bounds[3] - bounds[2])
+        dz_b = max(0.0, bounds[5] - bounds[4])
+        dx_a = max(0.001, asm_bounds[1] - asm_bounds[0])
+        dy_a = max(0.001, asm_bounds[3] - asm_bounds[2])
+        dz_a = max(0.001, asm_bounds[5] - asm_bounds[4])
+        vol_b = dx_b * dy_b * dz_b
+        vol_a = dx_a * dy_a * dz_a
+        if vol_a > 0 and vol_b / vol_a > MAX_PART_VOLUME_RATIO:
+            return True, f"Bounds zu groß ({vol_b/vol_a*100:.0f}% der Baugruppe)"
+
+    # Prüfe starke Überlappung mit bereits platzierten Teilen
+    for p in placed:
+        pb = p.get("bounds", [])
+        if len(pb) != 6:
+            continue
+        pct_a, pct_b = _bounds_overlap_pct(bounds, pb)
+        if pct_a > MAX_OVERLAP_THRESHOLD or pct_b > MAX_OVERLAP_THRESHOLD:
+            return True, (
+                f"Starke Überlappung mit '{p.get('name','?')}' "
+                f"({pct_a*100:.0f}%/{pct_b*100:.0f}%)"
+            )
+
+    return False, ""
+
+
+def _auto_place_in_assembly(part: dict, asm_bounds: list, placed: list) -> list:
+    """
+    Fallback: Platziert ein Teil automatisch in einem freien Bereich der Baugruppe.
+    Teilt die Baugruppe in ein Raster und wählt die am wenigsten belegte Zelle.
+    """
+    if not asm_bounds or len(asm_bounds) != 6:
+        return [-0.5, 0.5, -0.5, 0.5, 0.0, 1.0]
+
+    xmn, xmx, ymn, ymx, zmn, zmx = asm_bounds
+    dx = xmx - xmn
+    dy = ymx - ymn
+    dz = zmx - zmn
+
+    # Schätze sinnvolle Teilgröße: ca. 25-30% der Baugruppe pro Achse
+    part_dx = max(dx * DEFAULT_PART_SIZE_RATIO,   AUTO_PLACE_MIN_SIZE)
+    part_dy = max(dy * DEFAULT_PART_SIZE_RATIO,   AUTO_PLACE_MIN_SIZE)
+    part_dz = max(dz * DEFAULT_PART_SIZE_RATIO_Z, AUTO_PLACE_MIN_SIZE)
+
+    # Teile die X-Achse in Slots auf
+    n_slots = max(1, int(dx / part_dx))
+    best_slot = 0
+    best_overlap = float("inf")
+
+    for slot in range(n_slots):
+        sx = xmn + slot * (dx / n_slots)
+        ex = sx + part_dx
+        candidate = [sx, min(ex, xmx),
+                     ymn + dy * AUTO_PLACE_Y_MARGIN, ymx - dy * AUTO_PLACE_Y_MARGIN,
+                     zmn, min(zmn + part_dz, zmx)]
+        total_overlap = 0.0
+        for p in placed:
+            pb = p.get("bounds", [])
+            if len(pb) != 6:
+                continue
+            pct_a, _ = _bounds_overlap_pct(candidate, pb)
+            total_overlap += pct_a
+        if total_overlap < best_overlap:
+            best_overlap = total_overlap
+            best_slot = slot
+
+    sx = xmn + best_slot * (dx / max(1, n_slots))
+    ex = sx + part_dx
+    result = [sx, min(ex, xmx),
+              ymn + dy * AUTO_PLACE_Y_MARGIN, ymx - dy * AUTO_PLACE_Y_MARGIN,
+              zmn, min(zmn + part_dz, zmx)]
+    return result
+
+
+def _build_ascii_sketch(placed: list, asm_bounds: list, width: int = 40, height: int = 8) -> str:
+    """
+    Erzeugt eine einfache ASCII-Draufsicht (X=horizontal, Y=vertikal) der
+    bereits platzierten Teile innerhalb der Baugruppen-Bounds.
+    """
+    if not asm_bounds or len(asm_bounds) != 6 or not placed:
+        return ""
+
+    xmn, xmx = asm_bounds[0], asm_bounds[1]
+    ymn, ymx = asm_bounds[2], asm_bounds[3]
+    dx = max(0.001, xmx - xmn)
+    dy = max(0.001, ymx - ymn)
+
+    grid = [["." for _ in range(width)] for _ in range(height)]
+
+    legend = []
+    chars  = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+    for i, p in enumerate(placed[:len(chars)]):
+        b = p.get("bounds", [])
+        if len(b) != 6:
+            continue
+        ch = chars[i % len(chars)]
+        legend.append(f"{ch}={p.get('name','?')}")
+        # Mappe X→ spalte, Y→ zeile (Y-Achse invertiert für Top-Down)
+        c0 = int((b[0] - xmn) / dx * (width  - 1))
+        c1 = int((b[1] - xmn) / dx * (width  - 1))
+        r0 = int((1.0 - (b[3] - ymn) / dy) * (height - 1))
+        r1 = int((1.0 - (b[2] - ymn) / dy) * (height - 1))
+        c0, c1 = max(0, min(c0, width-1)),  max(0, min(c1, width-1))
+        r0, r1 = max(0, min(r0, height-1)), max(0, min(r1, height-1))
+        for r in range(r0, r1 + 1):
+            for c in range(c0, c1 + 1):
+                grid[r][c] = ch
+
+    lines  = ["+" + "-" * width + "+"]
+    for row in grid:
+        lines.append("|" + "".join(row) + "|")
+    lines.append("+" + "-" * width + "+")
+    if legend:
+        lines.append("Legende: " + ", ".join(legend[:12]))
+    return "\n".join(lines)
+
+
+def _build_ph2_user_prompt(part: dict, asm_item: dict, clf: dict,
+                           placed_same_asm: list, prompt: str,
+                           retry_info: str = "") -> str:
+    """Baut den vollständigen User-Prompt für Phase 2 (inkl. Spatial-Context)."""
+    part_name = part.get("name", "?")
+    asm_name  = part.get("_assembly", "")
+    rb        = asm_item.get("rough_bounds", clf.get("overall_bounds", []))
+
+    user = (
+        f'Objekt: "{prompt}"\n'
+        f'Gesamtbounds: {clf.get("overall_bounds","?")}\n'
+        f'Koordinatensystem: X=Länge(vorne=+X), Y=Breite(rechts=+Y), Z=Höhe(Boden=0)\n\n'
+        f'=== Baugruppe: {asm_name} ===\n'
+        f'Baugruppen-Bounds: {rb}\n'
+        f'Beschreibung: {asm_item.get("description","")}\n\n'
+    )
+
+    if placed_same_asm:
+        user += f'Bereits platzierte Teile in dieser Baugruppe ({len(placed_same_asm)}):\n'
+        for p in placed_same_asm:
+            b = p.get("bounds", [])
+            user += f'  {p["name"]}: {[round(v, 2) for v in b]}\n'
+        sketch = _build_ascii_sketch(placed_same_asm, rb)
+        if sketch:
+            user += f'\nDraufsicht (X→ rechts, Y↑ oben):\n{sketch}\n'
+        user += "\n"
+
+    if retry_info:
+        user += f'FEHLER BEI LETZTEM VERSUCH:\n{retry_info}\n\n'
+
+    user += (
+        f'=== Platziere jetzt ===\n'
+        f'Name:         {part_name}\n'
+        f'Beschreibung: {part.get("description","")}\n'
+        f'Methode:      {part.get("method","box")}\n'
+        f'Symmetrie:    {part.get("symmetry","none")}\n\n'
+        f'WICHTIG: Bounds MÜSSEN innerhalb der Baugruppen-Bounds liegen: {rb}\n'
+        f'WICHTIG: Bounds DÜRFEN NICHT identisch mit den Baugruppen-Bounds sein!\n'
+        f'WICHTIG: Das Teil ist nur ein kleines Stück der Baugruppe — deutlich kleiner!\n'
+        f'Gib [xmin,xmax,ymin,ymax,zmin,zmax] in Metern an.'
+    )
+    return user
+
 # ── LLM-Aufruf ───────────────────────────────────────────────────────────────
 
 def _call(system, user, model, host, phase, label, part):
@@ -520,6 +702,12 @@ def _h2(raw):
         queue  = list(_state["sub_queue"])
         idx    = _state["sub_index"]
         placed = list(_state["placed"])
+        clf    = dict(_state["classification"])
+        asm    = list(_state["assemblies"])
+        prompt = _state["user_prompt"]
+        model  = _state["llm_model"]
+        host   = _state["llm_host"]
+        retry  = _state.get("_ph2_retry_count", 0)
 
     if idx >= len(queue):
         _advance(3)
@@ -549,10 +737,16 @@ def _h2(raw):
             with _lock:
                 _state["placed"].append(placed_part)
                 _state["sub_index"] += 1
+                _state["_ph2_retry_count"] = 0
             _run_phase()
             return
 
-    # Normaler Bounds-Aufruf
+    # Normaler Bounds-Aufruf mit Validierung und Retry
+    asm_name = current.get("_assembly", "")
+    asm_item = next((a for a in asm if a.get("name") == asm_name), {})
+    asm_rb   = asm_item.get("rough_bounds", clf.get("overall_bounds", []))
+    same_asm = [p for p in placed if p.get("_assembly") == asm_name]
+
     try:
         data   = _parse_json(raw)
         bounds = data.get("bounds")
@@ -562,17 +756,51 @@ def _h2(raw):
 
     norm = mesh_builder.normalize_bounds(bounds)
     if norm is None:
-        norm = [-0.5, 0.5, -0.5, 0.5, 0.0, 1.0]
+        norm = asm_rb[:] if asm_rb else [-0.5, 0.5, -0.5, 0.5, 0.0, 1.0]
     b = mesh_builder.repair_bounds(norm, part_name)
 
-    placed_part         = dict(current)
-    placed_part["bounds"] = b
-    _log("OK", f"Bounds '{part_name}': {[round(v,2) for v in b]}", phase=2, part=part_name)
+    # Validierung: Prüfe ob Bounds plausibel sind
+    is_invalid, reason = _validate_ph2_bounds(b, asm_rb, same_asm)
 
+    if is_invalid and retry < MAX_BOUNDS_RETRIES:
+        _log("WARN",
+             f"Bounds '{part_name}' ungültig (Versuch {retry+1}/{MAX_BOUNDS_RETRIES+1}): {reason} "
+             f"→ Retry mit erweitertem Prompt",
+             phase=2, part=part_name)
+        with _lock:
+            _state["_ph2_retry_count"] = retry + 1
+        retry_user = _build_ph2_user_prompt(
+            current, asm_item, clf, same_asm, prompt,
+            retry_info=(
+                f"Du hast bounds={[round(v,2) for v in b]} zurückgegeben.\n"
+                f"Problem: {reason}\n"
+                f"Bitte andere, kleinere Bounds wählen die nur dieses eine Teil beschreiben!"
+            )
+        )
+        _call(prompts.PHASE_2_BOUNDS, retry_user,
+              model, host, 2,
+              f"Bounds-Retry {retry+1}: {part_name} ({idx+1}/{len(queue)})",
+              part_name)
+        return
+
+    if is_invalid:
+        # Alle Retries erschöpft → Auto-Platzierung
+        b = _auto_place_in_assembly(current, asm_rb, same_asm)
+        b = mesh_builder.repair_bounds(b, part_name)
+        _log("WARN",
+             f"Auto-Platzierung '{part_name}' (nach {retry} Retries): "
+             f"{[round(v,2) for v in b]}",
+             phase=2, part=part_name)
+    else:
+        _log("OK", f"Bounds '{part_name}': {[round(v,2) for v in b]}", phase=2, part=part_name)
+
+    placed_part           = dict(current)
+    placed_part["bounds"] = b
     mesh_builder.build_placeholder(placed_part)
     with _lock:
         _state["placed"].append(placed_part)
         _state["sub_index"] += 1
+        _state["_ph2_retry_count"] = 0
     _run_phase()
 
 

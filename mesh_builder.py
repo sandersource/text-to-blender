@@ -318,7 +318,6 @@ def build_final(parts: list) -> list:
         cache.log(cache.LEVEL_WARN, "Keine Teile.")
         return []
     clear_llm_objects()
-    col = get_or_create_collection()
     created, skipped = [], 0
     cache.log(cache.LEVEL_STEP, f"Baue {len(parts)} Meshes ...")
     for i, part in enumerate(parts):

@@ -1,5 +1,5 @@
 """
-cache.py - Text to Blender v6.0.0
+cache.py - Text to Blender v7.0.0
 ════════════════════════════════════
 Zentrales Log-, Cache- und Projektordner-Management.
 
@@ -113,7 +113,7 @@ def log_parts_list(parts: list, phase=0):
         log(LEVEL_DATA, "Teile-Liste:\n" + text, phase=phase)
         ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         with open(get_parts_list_path(), "w", encoding="utf-8") as f:
-            f.write(f"Text to Blender v6.0.0 – Teile-Liste\nErstellt: {ts} | Phase {phase}\n")
+            f.write(f"Text to Blender v7.0.0 – Teile-Liste\nErstellt: {ts} | Phase {phase}\n")
             f.write("=" * 120 + "\n" + text + "\n")
     except Exception as e:
         log(LEVEL_WARN, f"Teile-Listen-Log fehlgeschlagen: {e}")
@@ -146,10 +146,11 @@ def log_pointcloud(part_name: str, bounds: list, points: list, phase=0):
 # ── Cache I/O ────────────────────────────────────────────────────────────────
 
 _CACHE_FILES = {
-    0:   "phase0_classify.json",
+    0:   "phase0_classify.json",    # 0a+0b combined result
     1:   "phase1_structure.json",
     2:   "phase2_bounds.json",
     3:   "phase3_pointclouds.json",
+    4:   "phase4_mesh.json",
     5:   "phase5_materials.json",
 }
 

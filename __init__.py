@@ -1,7 +1,7 @@
 bl_info = {
     "name":        "Text to Blender",
     "author":      "Sander",
-    "version":     (7, 0, 0),
+    "version":     (7, 1, 0),
     "blender":     (4, 0, 0),
     "location":    "View3D > Sidebar > LLM",
     "description": "Universeller Text-to-3D Generator: Meshes, Materialien, Animationen, Scripte",
@@ -130,13 +130,13 @@ def register():
     cm = _modules.get("cache")
     if cm:
         try:
-            cm.log_separator("Text to Blender v7.0.0")
+            cm.log_separator("Text to Blender v7.1.0")
             cm.log(cm.LEVEL_INFO, "Bereit." if panel_ok else "FEHLER beim Laden!")
         except Exception:
             pass
 
     status = "OK" if (panel_ok and operators_ok) else "WITH ERRORS"
-    print(f"[Text to Blender] v7.0.0 registriert ({status}).")
+    print(f"[Text to Blender] v7.1.0 registriert ({status}).")
     if _import_errors:
         print("[Text to Blender] Errors encountered:")
         for e in _import_errors:
@@ -176,7 +176,7 @@ def unregister():
     except Exception:
         pass
 
-    print("[Text to Blender] v7.0.0 deregistriert.")
+    print("[Text to Blender] v7.1.0 deregistriert.")
 
 
 if __name__ == "__main__":

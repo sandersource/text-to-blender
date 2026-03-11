@@ -1,5 +1,5 @@
 """
-pipeline.py - Text to Blender v7.0.0
+pipeline.py - Text to Blender v7.1.0
 ══════════════════════════════════════
 Universelle hierarchische Pipeline v7.0.0:
 
@@ -59,7 +59,7 @@ DETAIL_POINTS = {"einfach": 8, "medium": 24, "hoch": 64}
 
 # ── Bounds-Validierung: Schwellwerte ─────────────────────────────────────────
 MAX_BOUNDS_RETRIES       = 2    # Maximale Anzahl Retry-Versuche für Phase 2
-MAX_PART_VOLUME_RATIO    = 0.90 # Teil darf max. 90% des Baugruppen-Volumens belegen
+MAX_PART_VOLUME_RATIO    = 0.85 # Teil darf max. 85% des Baugruppen-Volumens belegen
 MAX_OVERLAP_THRESHOLD    = 0.50 # Teile mit >50% Überlappung gelten als ungültig
 DEFAULT_PART_SIZE_RATIO  = 0.25 # Standard-Teilgröße: 25% der Baugruppe (X/Y)
 DEFAULT_PART_SIZE_RATIO_Z = 0.30 # Standard-Teilgröße: 30% der Baugruppe (Z)
@@ -101,7 +101,7 @@ def start(prompt, model, host, detail="medium", project_dir="",
 
     if project_dir:
         cache.set_project_dir(project_dir)
-    cache.log_separator(f"TEXT TO BLENDER v7.0.0 | Prompt: {prompt}")
+    cache.log_separator(f"TEXT TO BLENDER v7.1.0 | Prompt: {prompt}")
     _log("INFO",
          f"Limits: max_parts={max_parts_per_assembly}, "
          f"max_bounds={max_bounds_parts}, "
@@ -361,7 +361,7 @@ def _phase_4_main_thread():
 
 # ── Symmetrie-Expansion ───────────────────────────────────────────────────────
 
-def _expand_symmetry(part: dict, asm_name: str) -> list:
+def _expand_symmetry(part: dict, asm_name: str, asm_item: dict = None) -> list:
     sym  = part.get("symmetry", "none")
     name = part.get("name", "Teil")
     base = dict(part)
@@ -370,9 +370,14 @@ def _expand_symmetry(part: dict, asm_name: str) -> list:
     base["_symmetry_index"]  = 0
 
     if sym == "mirror_Y":
-        left  = dict(base); left["name"]  = f"{name}_L"; left["_symmetry_index"] = 0
-        right = dict(base); right["name"] = f"{name}_R"; right["_symmetry_index"] = 1
-        return [left, right]
+        # Nur expandieren wenn die Baugruppe mehr als 1 geschätztes Teil hat
+        # (verhindert Explosion bei einzelnen Buttons)
+        if asm_item is not None and asm_item.get("estimated_parts", 2) <= 1:
+            sym = "none"
+        else:
+            left  = dict(base); left["name"]  = f"{name}_L"; left["_symmetry_index"] = 0
+            right = dict(base); right["name"] = f"{name}_R"; right["_symmetry_index"] = 1
+            return [left, right]
 
     if sym.startswith("radial_"):
         try:
@@ -441,9 +446,8 @@ def _validate_ph2_bounds(bounds: list, asm_bounds: list, placed: list):
         return True, "Bounds fehlen oder ungültiges Format"
 
     if asm_bounds and len(asm_bounds) == 6:
-        # Prüfe ob Bounds identisch mit Baugruppen-Bounds sind
-        if all(abs(bounds[i] - asm_bounds[i]) < 0.01 for i in range(6)):
-            return True, f"Bounds identisch mit Baugruppen-Bounds {[round(v,2) for v in asm_bounds]}"
+        # Prüfe ob Bounds zu ähnlich zu Baugruppen-Bounds sind (Volumen-Verhältnis)
+        # (absoluter 0.01m-Check wäre zu streng bei kleinen Baugruppen)
         # Prüfe ob Teil größer als die Baugruppe ist
         dx_b = max(0.0, bounds[1] - bounds[0])
         dy_b = max(0.0, bounds[3] - bounds[2])
@@ -471,52 +475,81 @@ def _validate_ph2_bounds(bounds: list, asm_bounds: list, placed: list):
     return False, ""
 
 
-def _auto_place_in_assembly(part: dict, asm_bounds: list, placed: list) -> list:
+def _auto_place_in_assembly(part: dict, asm_bounds: list, placed: list,
+                            part_index: int = 0, total_parts: int = 1) -> list:
     """
-    Fallback: Platziert ein Teil automatisch in einem freien Bereich der Baugruppe.
-    Teilt die Baugruppe in ein Raster und wählt die am wenigsten belegte Zelle.
+    Fallback: Platziert ein Teil in einem eindeutigen Teilbereich der Baugruppe.
+    Teilt die längste Achse in total_parts gleiche Slots; part_index wählt den Slot.
+    So erhält jedes Teil eindeutige, nicht-identische Bounds.
     """
     if not asm_bounds or len(asm_bounds) != 6:
         return [-0.5, 0.5, -0.5, 0.5, 0.0, 1.0]
 
     xmn, xmx, ymn, ymx, zmn, zmx = asm_bounds
-    dx = xmx - xmn
-    dy = ymx - ymn
-    dz = zmx - zmn
+    dx, dy, dz = xmx - xmn, ymx - ymn, zmx - zmn
 
-    # Schätze sinnvolle Teilgröße: ca. 25-30% der Baugruppe pro Achse
-    part_dx = max(dx * DEFAULT_PART_SIZE_RATIO,   AUTO_PLACE_MIN_SIZE)
-    part_dy = max(dy * DEFAULT_PART_SIZE_RATIO,   AUTO_PLACE_MIN_SIZE)
-    part_dz = max(dz * DEFAULT_PART_SIZE_RATIO_Z, AUTO_PLACE_MIN_SIZE)
+    # Finde die längste Achse und teile sie in total_parts Slots auf
+    n = max(1, total_parts)
+    frac = 1.0 / n
+    slot = part_index % n  # sicher gegen out-of-range
 
-    # Teile die X-Achse in Slots auf
-    n_slots = max(1, int(dx / part_dx))
-    best_slot = 0
-    best_overlap = float("inf")
+    if dx >= dy and dx >= dz:
+        # X ist die längste Achse
+        slot_start = xmn + slot * dx * frac
+        slot_end   = slot_start + dx * frac
+        # Teilgröße: 30-50% der jeweiligen Baugruppen-Achse
+        part_dy = max(dy * 0.40, AUTO_PLACE_MIN_SIZE)
+        part_dz = max(dz * DEFAULT_PART_SIZE_RATIO_Z, AUTO_PLACE_MIN_SIZE)
+        cy = (ymn + ymx) / 2
+        cz = zmn
+        return [slot_start, slot_end,
+                cy - part_dy / 2, cy + part_dy / 2,
+                cz, min(cz + part_dz, zmx)]
+    elif dy >= dx and dy >= dz:
+        # Y ist die längste Achse
+        slot_start = ymn + slot * dy * frac
+        slot_end   = slot_start + dy * frac
+        part_dx = max(dx * 0.40, AUTO_PLACE_MIN_SIZE)
+        part_dz = max(dz * DEFAULT_PART_SIZE_RATIO_Z, AUTO_PLACE_MIN_SIZE)
+        cx = (xmn + xmx) / 2
+        cz = zmn
+        return [cx - part_dx / 2, cx + part_dx / 2,
+                slot_start, slot_end,
+                cz, min(cz + part_dz, zmx)]
+    else:
+        # Z ist die längste Achse
+        slot_start = zmn + slot * dz * frac
+        slot_end   = slot_start + dz * frac
+        part_dx = max(dx * 0.40, AUTO_PLACE_MIN_SIZE)
+        part_dy = max(dy * 0.40, AUTO_PLACE_MIN_SIZE)
+        cx = (xmn + xmx) / 2
+        cy = (ymn + ymx) / 2
+        return [cx - part_dx / 2, cx + part_dx / 2,
+                cy - part_dy / 2, cy + part_dy / 2,
+                slot_start, slot_end]
 
-    for slot in range(n_slots):
-        sx = xmn + slot * (dx / n_slots)
-        ex = sx + part_dx
-        candidate = [sx, min(ex, xmx),
-                     ymn + dy * AUTO_PLACE_Y_MARGIN, ymx - dy * AUTO_PLACE_Y_MARGIN,
-                     zmn, min(zmn + part_dz, zmx)]
-        total_overlap = 0.0
-        for p in placed:
-            pb = p.get("bounds", [])
-            if len(pb) != 6:
-                continue
-            pct_a, _ = _bounds_overlap_pct(candidate, pb)
-            total_overlap += pct_a
-        if total_overlap < best_overlap:
-            best_overlap = total_overlap
-            best_slot = slot
 
-    sx = xmn + best_slot * (dx / max(1, n_slots))
-    ex = sx + part_dx
-    result = [sx, min(ex, xmx),
-              ymn + dy * AUTO_PLACE_Y_MARGIN, ymx - dy * AUTO_PLACE_Y_MARGIN,
-              zmn, min(zmn + part_dz, zmx)]
-    return result
+def _enforce_min_assembly_bounds(asm_bounds: list, overall_bounds: list,
+                                  min_ratio: float = 0.15) -> list:
+    """
+    Stellt sicher dass Baugruppen-Bounds mindestens min_ratio der Overall-Bounds
+    pro Achse haben (verhindert zu kleine Baugruppen in denen Teile nicht platziert
+    werden können).
+    """
+    if not overall_bounds or len(overall_bounds) != 6:
+        return asm_bounds
+    ob = overall_bounds
+    ab = list(asm_bounds)
+    for i in range(3):
+        lo_idx, hi_idx = i * 2, i * 2 + 1
+        overall_size = ob[hi_idx] - ob[lo_idx]
+        asm_size     = ab[hi_idx] - ab[lo_idx]
+        min_size     = overall_size * min_ratio
+        if asm_size < min_size and min_size > 0:
+            center     = (ab[lo_idx] + ab[hi_idx]) / 2
+            ab[lo_idx] = center - min_size / 2
+            ab[hi_idx] = center + min_size / 2
+    return ab
 
 
 def _build_ascii_sketch(placed: list, asm_bounds: list, width: int = 40, height: int = 8) -> str:
@@ -795,13 +828,55 @@ def _h1a(raw):
         with _lock:
             clf = _state["classification"]
         assemblies = [{
-            "name":        "main_body",
+            "name":        "body",
             "description": f"Hauptkörper von {clf.get('object_type','Objekt')}",
             "role":        "Hauptstruktur",
             "estimated_parts": 3,
             "rough_bounds": clf.get("overall_bounds", [-0.5, 0.5, -0.5, 0.5, 0.0, 1.0]),
         }]
-        _log("WARN", "Ph1a: keine Baugruppen → verwende Fallback 'main_body'", phase=0)
+        _log("WARN", "Ph1a: keine Baugruppen → verwende Fallback 'body'", phase=0)
+
+    with _lock:
+        clf = dict(_state["classification"])
+
+    overall_bounds = clf.get("overall_bounds", [])
+    object_type    = clf.get("object_type", "Objekt")
+
+    # Bug 3: Wenn kein Hauptkörper/Gehäuse vorhanden, einen einfügen
+    _BODY_NAMES = {"body", "gehaeuse", "shell", "rahmen", "chassis",
+                   "frame", "korpus", "hauptkoerper", "main_body", "base"}
+    has_body = any(a.get("name", "").lower() in _BODY_NAMES for a in assemblies)
+    if not has_body and overall_bounds and len(overall_bounds) == 6:
+        ob = overall_bounds
+        # Hauptkörper abdeckt 90% der Overall-Bounds (Z leicht reduziert)
+        body_asm = {
+            "name":        "body",
+            "description": f"Hauptkörper/Gehäuse des {object_type}",
+            "role":        "äußere Hülle die alle anderen Teile trägt",
+            "estimated_parts": 1,
+            "rough_bounds": [
+                ob[0] * 0.9, ob[1] * 0.9,
+                ob[2] * 0.9, ob[3] * 0.9,
+                ob[4], ob[5] * 0.85 if ob[5] > 0 else ob[5],
+            ]
+        }
+        assemblies.insert(0, body_asm)
+        _log("WARN",
+             f"Ph1a: kein Hauptkörper gefunden → 'body' automatisch eingefügt",
+             phase=0)
+
+    # Bug 5: Mindest-Bounds für alle Baugruppen sicherstellen
+    if overall_bounds and len(overall_bounds) == 6:
+        for a in assemblies:
+            rb = a.get("rough_bounds")
+            if rb and len(rb) == 6:
+                enforced = _enforce_min_assembly_bounds(rb, overall_bounds)
+                if enforced != rb:
+                    _log("INFO",
+                         f"Ph1a: Baugruppe '{a.get('name','?')}' Bounds vergrößert "
+                         f"(zu klein für Unterteile)",
+                         phase=0)
+                    a["rough_bounds"] = enforced
 
     # Baugruppen-Bounds visualisieren
     zones = [{"name": a["name"], "bounds": a.get("rough_bounds", [])}
@@ -810,7 +885,6 @@ def _h1a(raw):
         mesh_builder.visualize_zones(zones)
 
     with _lock:
-        clf = dict(_state["classification"])
         clf["assemblies"] = assemblies
         _state["classification"] = clf
         _state["assemblies"]     = assemblies
@@ -851,7 +925,14 @@ def _h1(raw):
 
     expanded = []
     for p in raw_parts:
-        expanded.extend(_expand_symmetry(p, asm_name))
+        expanded.extend(_expand_symmetry(p, asm_name, asm_item))
+
+    # Cap: gesamte expandierte Teile dürfen mpa nicht überschreiten
+    if len(expanded) > mpa:
+        _log("WARN",
+             f"Baugruppe '{asm_name}': {len(expanded)} Teile nach Expansion → auf {mpa} begrenzt",
+             phase=1, part=asm_name)
+        expanded = expanded[:mpa]
 
     _log("OK",
          f"Baugruppe '{asm_name}': {len(raw_parts)} Basis-Teile → {len(expanded)} nach Expansion",
@@ -951,8 +1032,12 @@ def _h2(raw):
         return
 
     if is_invalid:
-        # Alle Retries erschöpft → Auto-Platzierung
-        b = _auto_place_in_assembly(current, asm_rb, same_asm)
+        # Alle Retries erschöpft → Auto-Platzierung mit eindeutigem Slot pro Teil
+        total_in_asm = sum(1 for p in queue if p.get("_assembly") == asm_name)
+        part_idx_in_asm = len(same_asm)
+        b = _auto_place_in_assembly(current, asm_rb, same_asm,
+                                    part_index=part_idx_in_asm,
+                                    total_parts=total_in_asm)
         b = mesh_builder.repair_bounds(b, part_name)
         _log("WARN",
              f"Auto-Platzierung '{part_name}' (nach {retry} Retries): "

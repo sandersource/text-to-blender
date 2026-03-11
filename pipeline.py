@@ -60,12 +60,16 @@ DETAIL_POINTS = {"einfach": 8, "medium": 24, "hoch": 64}
 # ── Bounds-Validierung: Schwellwerte ─────────────────────────────────────────
 MAX_BOUNDS_RETRIES       = 2    # Maximale Anzahl Retry-Versuche für Phase 2
 MAX_PART_VOLUME_RATIO    = 0.85 # Teil darf max. 85% des Baugruppen-Volumens belegen
+                                  # (reduziert von 0.90 auf 0.85 um auch kleine Baugruppen
+                                  #  korrekt zu validieren, ersetzt absoluten 0.01m-Check)
 MAX_OVERLAP_THRESHOLD    = 0.50 # Teile mit >50% Überlappung gelten als ungültig
 DEFAULT_PART_SIZE_RATIO  = 0.25 # Standard-Teilgröße: 25% der Baugruppe (X/Y)
 DEFAULT_PART_SIZE_RATIO_Z = 0.30 # Standard-Teilgröße: 30% der Baugruppe (Z)
 AUTO_PLACE_MIN_SIZE      = 0.05 # Minimale Teilgröße bei Auto-Platzierung (m)
 AUTO_PLACE_Y_MARGIN      = 0.10 # Y-Achsen-Rand bei Auto-Platzierung (10% pro Seite)
 MAX_ASSEMBLIES           = 6    # Maximale Anzahl Baugruppen (Phase 1a)
+BODY_XY_SCALE_FACTOR     = 0.9  # Hauptkörper abdeckt 90% der XY-Overall-Bounds
+BODY_Z_SCALE_FACTOR      = 0.85 # Hauptkörper Höhe: 85% der Z-Overall-Bounds
 MAX_OTHER_PARTS_DISPLAY  = 8    # Maximale Anzahl anderer Teile im Phase-2-Kontext
 
 # ── Logging ──────────────────────────────────────────────────────────────────
@@ -372,7 +376,8 @@ def _expand_symmetry(part: dict, asm_name: str, asm_item: dict = None) -> list:
     if sym == "mirror_Y":
         # Nur expandieren wenn die Baugruppe mehr als 1 geschätztes Teil hat
         # (verhindert Explosion bei einzelnen Buttons)
-        if asm_item is not None and asm_item.get("estimated_parts", 2) <= 1:
+        est_parts = asm_item.get("estimated_parts") if asm_item is not None else None
+        if est_parts is not None and est_parts <= 1:
             sym = "none"
         else:
             left  = dict(base); left["name"]  = f"{name}_L"; left["_symmetry_index"] = 0
@@ -848,16 +853,17 @@ def _h1a(raw):
     has_body = any(a.get("name", "").lower() in _BODY_NAMES for a in assemblies)
     if not has_body and overall_bounds and len(overall_bounds) == 6:
         ob = overall_bounds
-        # Hauptkörper abdeckt 90% der Overall-Bounds (Z leicht reduziert)
+        # Hauptkörper abdeckt BODY_XY_SCALE_FACTOR der XY-Overall-Bounds,
+        # BODY_Z_SCALE_FACTOR der Z-Overall-Bounds
         body_asm = {
             "name":        "body",
             "description": f"Hauptkörper/Gehäuse des {object_type}",
             "role":        "äußere Hülle die alle anderen Teile trägt",
             "estimated_parts": 1,
             "rough_bounds": [
-                ob[0] * 0.9, ob[1] * 0.9,
-                ob[2] * 0.9, ob[3] * 0.9,
-                ob[4], ob[5] * 0.85 if ob[5] > 0 else ob[5],
+                ob[0] * BODY_XY_SCALE_FACTOR, ob[1] * BODY_XY_SCALE_FACTOR,
+                ob[2] * BODY_XY_SCALE_FACTOR, ob[3] * BODY_XY_SCALE_FACTOR,
+                ob[4], ob[5] * BODY_Z_SCALE_FACTOR if ob[5] > 0 else ob[5],
             ]
         }
         assemblies.insert(0, body_asm)

@@ -368,6 +368,8 @@ def _build_box(name: str, b: list):
     return obj
 
 def _build_cylinder(name: str, b: list):
+    """Erstellt einen Zylinder via bpy.ops (Blender 4.x-kompatibel).
+    bmesh.ops.create_cylinder() existiert in Blender 4.x nicht mehr."""
     h  = max(float(b[5]) - float(b[4]), MIN_SIZE)
     rx = (float(b[1]) - float(b[0])) / 2.0
     ry = (float(b[3]) - float(b[2])) / 2.0
